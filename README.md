@@ -20,6 +20,24 @@ views. It runs unchanged on Windows, macOS and Linux.
   with. The folder listing is refreshed on every keystroke, so files added or removed while
   browsing are picked up immediately.
 
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` | Undo / Redo |
+| `Ctrl+O` / `Ctrl+S` | Open… / Save as… |
+| `P` / `C` | Pan / Crop tool |
+| `R` / `L` | Rotate 90° right / left |
+| `H` / `V` | Flip horizontal / vertical |
+| `Enter` | Apply the crop selection |
+| `Esc` | Close dialog, clear crop selection, back to Pan |
+| `+` / `−` | Zoom in / out (about canvas center) |
+| `0` / `1` | Fit to window / 100% |
+| `←`/`→`, `↑`/`↓`, `Home` | Folder navigation (see above) |
+
+Shortcuts never fire while a text field has focus; while the Save-As or Resize dialog is
+open, only `Esc` acts.
+
 ### Editing
 - **Crop** (drag a selection, live size readout), **resize** with real resamplers
   (Lanczos3 / CatmullRom / Box / Bilinear / Nearest via `fast_image_resize` SIMD), **rotate 90°

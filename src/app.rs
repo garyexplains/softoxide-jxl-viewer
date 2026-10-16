@@ -88,6 +88,8 @@ pub struct App {
     pub(crate) error: Option<String>,
     /// File this session was opened with; Home returns here.
     pub(crate) original_path: Option<PathBuf>,
+    /// Last-known canvas rect, used as the anchor for keyboard zooming.
+    pub(crate) canvas_rect: Option<egui::Rect>,
 
     pub(crate) texture: Option<TextureHandle>,
     pub(crate) texture_nearest: bool,
@@ -122,6 +124,7 @@ impl App {
             status: String::new(),
             error: None,
             original_path: None,
+            canvas_rect: None,
             texture: None,
             texture_nearest: false,
             needs_rebuild: true,
@@ -392,7 +395,7 @@ impl eframe::App for App {
     /// Draw the whole app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.handle_nav_keys(&ctx);
+        self.handle_shortcuts(&ctx);
         self.refresh_texture(&ctx);
 
         egui::Panel::top("toolbar")
@@ -411,26 +414,168 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// Arrow-key folder navigation while viewing a file:
-    /// Left/Right = previous/next image alphabetically, Up/Down = by mtime.
-    /// Home returns to the file this session was opened with.
-    fn handle_nav_keys(&mut self, ctx: &egui::Context) {
-        let (left, right, up, down, home) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowLeft),
-                i.key_pressed(egui::Key::ArrowRight),
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::Home),
-            )
-        });
-        if !(left || right || up || down || home) {
+    /// Keyboard shortcuts.
+    ///
+    /// * Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) — undo / redo
+    /// * Ctrl+O / Ctrl+S — open / save-as
+    /// * P / C — pan / crop tool
+    /// * R / L — rotate right / left, H / V — flip horizontal / vertical
+    /// * + / − — zoom, 0 — fit, 1 — 1:1
+    /// * Enter — apply crop selection, Escape — close dialog / clear crop
+    /// * ←/→ by name, ↑/↓ by mtime, Home — original file (folder navigation)
+    ///
+    /// Never fires while a text field has keyboard focus; when a dialog is
+    /// open, only Escape acts.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::Key;
+        let pressed = |key: Key| ctx.input(|i| i.key_pressed(key));
+
+        // Never hijack keys while a text field (e.g. a DragValue) has focus.
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
-        // Don't hijack arrows while a text field has focus or a dialog is up.
-        if ctx.egui_wants_keyboard_input()
-            || (self.save_dialog.is_some() || self.resize_dialog.is_some())
-        {
+
+        let escape = pressed(Key::Escape);
+        if escape {
+            if self.save_dialog.take().is_some() {
+                ctx.request_repaint();
+                return;
+            }
+            if self.resize_dialog.take().is_some() {
+                ctx.request_repaint();
+                return;
+            }
+            if self.crop_rect.is_some() || self.crop_drag.is_some() {
+                self.crop_rect = None;
+                self.crop_drag = None;
+                ctx.request_repaint();
+                return;
+            }
+            if self.tool == Tool::Crop {
+                self.tool = Tool::Pan;
+                ctx.request_repaint();
+                return;
+            }
+            if self.error.take().is_some() {
+                ctx.request_repaint();
+                return;
+            }
+        }
+
+        // While a modal-ish dialog is up, other shortcuts are ignored.
+        if self.save_dialog.is_some() || self.resize_dialog.is_some() {
+            return;
+        }
+
+        let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        let shift = ctx.input(|i| i.modifiers.shift);
+        let plain = ctx.input(|i| {
+            let m = i.modifiers;
+            !m.ctrl && !m.alt && !m.shift && !m.mac_cmd && !m.command
+        });
+
+        // ---- undo / redo ---------------------------------------------------
+        if ctrl && !shift && pressed(Key::Z) {
+            self.undo_last(ctx);
+            return;
+        }
+        if ctrl && (pressed(Key::Y) || (shift && pressed(Key::Z))) {
+            self.redo_last(ctx);
+            return;
+        }
+
+        // ---- file ------------------------------------------------------------
+        if ctrl && pressed(Key::O) {
+            self.pick_open_file();
+            return;
+        }
+        if ctrl && pressed(Key::S) {
+            if self.doc.is_some() {
+                self.save_dialog = Some(SaveDialogState {
+                    format: SaveFormat::Jxl,
+                    jxl: JxlSaveOptions::default(),
+                    jpeg: JpegSaveOptions::default(),
+                });
+                ctx.request_repaint();
+            }
+            return;
+        }
+
+        // ---- tools -----------------------------------------------------------
+        if plain && pressed(Key::P) {
+            self.tool = Tool::Pan;
+            self.crop_rect = None;
+            self.crop_drag = None;
+            ctx.request_repaint();
+            return;
+        }
+        if plain && pressed(Key::C) {
+            self.tool = Tool::Crop;
+            self.crop_rect = None;
+            self.crop_drag = None;
+            ctx.request_repaint();
+            return;
+        }
+
+        // ---- edits (need an image) ------------------------------------------
+        let has_doc = self.doc.is_some();
+        if !has_doc {
+            return;
+        }
+        if plain && pressed(Key::R) {
+            self.apply_edit(ctx, |r| Ok(r.rotate_cw()));
+            return;
+        }
+        if plain && pressed(Key::L) {
+            self.apply_edit(ctx, |r| Ok(r.rotate_ccw()));
+            return;
+        }
+        if plain && pressed(Key::H) {
+            self.apply_edit(ctx, |r| Ok(r.flip_h()));
+            return;
+        }
+        if plain && pressed(Key::V) {
+            self.apply_edit(ctx, |r| Ok(r.flip_v()));
+            return;
+        }
+
+        // ---- crop selection --------------------------------------------------
+        if self.tool == Tool::Crop && self.crop_rect.is_some() && pressed(Key::Enter) {
+            self.apply_crop(ctx);
+            return;
+        }
+
+        // ---- zoom ------------------------------------------------------------
+        if plain && (pressed(Key::Plus) || pressed(Key::Equals)) {
+            self.zoom_step(ctx, 1.25);
+            return;
+        }
+        if plain && pressed(Key::Minus) {
+            self.zoom_step(ctx, 1.0 / 1.25);
+            return;
+        }
+        if plain && pressed(Key::Num0) {
+            self.viewer.zoom = None;
+            self.viewer.offset = Vec2::ZERO;
+            ctx.request_repaint();
+            return;
+        }
+        if plain && pressed(Key::Num1) {
+            self.viewer.zoom = Some(1.0);
+            self.viewer.offset = Vec2::ZERO;
+            ctx.request_repaint();
+            return;
+        }
+
+        // ---- folder navigation ------------------------------------------------
+        let (left, right, up, down, home) = (
+            pressed(Key::ArrowLeft),
+            pressed(Key::ArrowRight),
+            pressed(Key::ArrowUp),
+            pressed(Key::ArrowDown),
+            pressed(Key::Home),
+        );
+        if !(left || right || up || down || home) {
             return;
         }
 
@@ -449,7 +594,9 @@ impl App {
         }
 
         let Some(doc) = &self.doc else { return };
-        let Some(path) = doc.path.clone() else { return };
+        let Some(path) = doc.path.clone() else {
+            return;
+        };
         let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
             return;
         };
@@ -466,6 +613,24 @@ impl App {
         if let Some(target) = target {
             self.open_path(target);
         }
+    }
+
+    /// Keyboard zoom about the canvas center.
+    fn zoom_step(&mut self, ctx: &egui::Context, factor: f32) {
+        let Some(doc) = &self.doc else { return };
+        let Some(canvas) = self.canvas_rect else {
+            return;
+        };
+        let img_size = Vec2::new(doc.raster.width as f32, doc.raster.height as f32);
+        let zoom = self.effective_zoom(canvas.size(), img_size);
+        let new_zoom = (zoom * factor).clamp(0.02, 60.0);
+        let anchor_screen = canvas.center();
+        let img_rect = Rect::from_min_size(canvas.min + self.viewer.offset, img_size * zoom);
+        let anchor = crate::view::screen_to_px(anchor_screen, img_rect, img_size);
+        self.viewer.zoom = Some(new_zoom);
+        self.viewer.offset = (anchor_screen - canvas.min) - anchor * new_zoom;
+        self.needs_rebuild = true;
+        ctx.request_repaint();
     }
 
     fn effective_zoom(&self, avail: Vec2, img: Vec2) -> f32 {
@@ -521,6 +686,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button(format!("{}  Open…", icons::FOLDER_OPEN))
+                .on_hover_text("Open an image (Ctrl+O)")
                 .clicked()
             {
                 self.pick_open_file();
@@ -533,6 +699,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Undo", icons::ARROW_COUNTER_CLOCKWISE)),
                 )
+                .on_hover_text("Undo (Ctrl+Z)")
                 .clicked()
             {
                 self.undo_last(ctx);
@@ -542,6 +709,7 @@ impl App {
                     has && !self.redo.is_empty(),
                     egui::Button::new(format!("{}  Redo", icons::ARROW_CLOCKWISE)),
                 )
+                .on_hover_text("Redo (Ctrl+Y)")
                 .clicked()
             {
                 self.redo_last(ctx);
@@ -550,6 +718,7 @@ impl App {
 
             if ui
                 .selectable_label(self.tool == Tool::Pan, format!("{}  Pan", icons::HAND_PALM))
+                .on_hover_text("Pan tool (P) — drag to move the image")
                 .clicked()
             {
                 self.tool = Tool::Pan;
@@ -558,6 +727,7 @@ impl App {
             }
             if ui
                 .selectable_label(self.tool == Tool::Crop, format!("{}  Crop", icons::CROP))
+                .on_hover_text("Crop tool (C) — drag a selection, Enter to apply, Esc to cancel")
                 .clicked()
             {
                 self.tool = Tool::Crop;
@@ -570,6 +740,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Rotate L", icons::ARROW_COUNTER_CLOCKWISE)),
                 )
+                .on_hover_text("Rotate 90° left (L)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_ccw()));
@@ -579,6 +750,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Rotate R", icons::ARROW_CLOCKWISE)),
                 )
+                .on_hover_text("Rotate 90° right (R)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_cw()));
@@ -588,6 +760,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Flip H", icons::FLIP_HORIZONTAL)),
                 )
+                .on_hover_text("Flip horizontally (H)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.flip_h()));
@@ -597,6 +770,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Flip V", icons::FLIP_VERTICAL)),
                 )
+                .on_hover_text("Flip vertically (V)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.flip_v()));
@@ -628,6 +802,7 @@ impl App {
                     has,
                     egui::Button::new(format!("{}  Save as…", icons::FLOPPY_DISK)),
                 )
+                .on_hover_text("Save as… (Ctrl+S)")
                 .clicked()
             {
                 self.save_dialog = Some(SaveDialogState {
@@ -642,11 +817,19 @@ impl App {
                 Some(z) => format!("{} {:.0}%", icons::MAGNIFYING_GLASS_PLUS, z * 100.0),
                 None => format!("{}  fit", icons::FRAME_CORNERS),
             };
-            if ui.button(zoom_label).clicked() {
+            if ui
+                .button(zoom_label)
+                .on_hover_text("Fit to window (0); mouse wheel zooms at the pointer")
+                .clicked()
+            {
                 self.viewer.zoom = None;
                 self.viewer.offset = Vec2::ZERO;
             }
-            if ui.add_enabled(has, egui::Button::new("1:1")).clicked() {
+            if ui
+                .add_enabled(has, egui::Button::new("1:1"))
+                .on_hover_text("Actual size, 100% (1)")
+                .clicked()
+            {
                 self.viewer.zoom = Some(1.0);
                 self.viewer.offset = Vec2::ZERO;
             }
@@ -673,6 +856,7 @@ impl App {
 
     fn show_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let avail_rect = ui.available_rect_before_wrap();
+        self.canvas_rect = Some(avail_rect);
         let (_, response) = ui.allocate_exact_size(avail_rect.size(), Sense::click_and_drag());
         let painter = ui.painter_at(avail_rect);
         painter.rect_filled(avail_rect, 0.0, Color32::from_rgb(26, 26, 30));

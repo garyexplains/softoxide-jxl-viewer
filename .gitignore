@@ -1,0 +1,11 @@
+# Build artifacts
+/target/
+jxl-native/target/
+
+# Vendored native sources (fetched via tools/fetch-libjxl.*)
+/third_party/
+
+# Editor junk
+.idea/
+.vscode/
+*.swp

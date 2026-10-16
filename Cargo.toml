@@ -1,0 +1,36 @@
+[workspace]
+members = [".", "jxl-native"]
+resolver = "3"
+
+[package]
+name = "jxlviewer"
+version = "0.1.0"
+edition = "2024"
+description = "Native JPEG XL image viewer, editor and converter (Windows/macOS/Linux)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+jxl-native = { path = "jxl-native" }
+
+# GUI — rendered entirely by the app itself (no OS widget toolkits)
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+# Common formats (PNG / JPEG / GIF / BMP / TIFF / WebP)
+image = "0.25"
+
+# Pure-Rust JPEG XL decode (with moxcms for sRGB color management)
+jxl-oxide = { version = "0.12.6", features = ["moxcms"] }
+
+# Fast SIMD resampling for edit ops
+fast_image_resize = "6"
+
+# JPEG encoding with quality + subsampling control
+jpeg-encoder = "0.6"
+
+# Native file dialogs (open/save pickers only; no image support from OS)
+rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "debuginfo"

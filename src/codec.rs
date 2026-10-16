@@ -27,6 +27,7 @@ pub enum Format {
     Bmp,
     Tiff,
     WebP,
+    Pnm,
     Unknown,
 }
 
@@ -40,6 +41,7 @@ impl Format {
             Format::Bmp => "BMP",
             Format::Tiff => "TIFF",
             Format::WebP => "WebP",
+            Format::Pnm => "PNM (PPM/PGM)",
             Format::Unknown => "Unknown",
         }
     }
@@ -51,6 +53,7 @@ impl Format {
             Format::Jpeg => "jpg",
             Format::Bmp => "bmp",
             Format::Tiff => "tiff",
+            Format::Pnm => "ppm",
             _ => "png",
         }
     }
@@ -65,6 +68,7 @@ pub fn format_by_extension(ext: &str) -> Format {
         "bmp" | "dib" => Format::Bmp,
         "tif" | "tiff" => Format::Tiff,
         "webp" => Format::WebP,
+        "ppm" | "pgm" | "pbm" | "pnm" => Format::Pnm,
         _ => Format::Unknown,
     }
 }
@@ -94,6 +98,14 @@ pub fn detect_format(bytes: &[u8], ext_hint: Option<&str>) -> Format {
     }
     if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
         return Format::WebP;
+    }
+    // Netpbm: P1..P7 (P6 = color PPM, P5 = gray PGM, PF = float PFM…)
+    if bytes.len() >= 3
+        && bytes[0] == b'P'
+        && matches!(bytes[1], b'1'..=b'7')
+        && (bytes[2] as char).is_ascii_whitespace()
+    {
+        return Format::Pnm;
     }
     if let Some(e) = ext_hint {
         let f = format_by_extension(e);

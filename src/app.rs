@@ -237,7 +237,9 @@ impl App {
                     hdr: img.hdr,
                 });
                 if let Some(note) = &img.note {
-                    self.error = Some(note.clone());
+                    // Informational (e.g. "decoded with libjxl (16-bit exact
+                    // path)") — belongs in the status line, not an error toast.
+                    self.status = format!("{} ({note})", self.status);
                 }
                 self.undo.clear();
                 self.redo.clear();
@@ -853,7 +855,8 @@ impl App {
         dialog = dialog.add_filter(
             "Images",
             &[
-                "jxl", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp",
+                "jxl", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "ppm", "pgm",
+                "pbm", "pnm",
             ],
         );
         if let Some(path) = dialog.pick_file() {

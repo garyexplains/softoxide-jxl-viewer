@@ -160,9 +160,92 @@ fn format_ext(f: SaveFormat) -> &'static str {
     }
 }
 
+/// A named distance/effort combination offered in the JXL save dialog.
+struct JxlPreset {
+    name: &'static str,
+    tip: &'static str,
+    lossless: bool,
+    distance: f32,
+    effort: i64,
+}
+
+/// Presets grounded in measurements on a 1920×1080 photo-like image
+/// (`examples/gen_photo.rs`): lossless ≈ 22% of PNG, d1.0 ≈ 8%, d2.0 ≈ 3%,
+/// d4.0 ≈ 0.6%. Effort shifts size a few % and encode time a lot.
+const JXL_PRESETS: &[JxlPreset] = &[
+    JxlPreset {
+        name: "Lossless",
+        tip: "Pixel-perfect (distance 0, modular).\nTypically 20–60% of the PNG size.",
+        lossless: true,
+        distance: 0.0,
+        effort: 7,
+    },
+    JxlPreset {
+        name: "Visually lossless",
+        tip: "Distance 1.0, effort 7 (the default).\nIndistinguishable from the original at normal viewing.",
+        lossless: false,
+        distance: 1.0,
+        effort: 7,
+    },
+    JxlPreset {
+        name: "Balanced",
+        tip: "Distance 2.0, effort 7.\n~3× smaller than visually lossless; mild softening side-by-side.",
+        lossless: false,
+        distance: 2.0,
+        effort: 7,
+    },
+    JxlPreset {
+        name: "Small",
+        tip: "Distance 4.0, effort 7.\nThumbnails/web previews; clearly lossy.",
+        lossless: false,
+        distance: 4.0,
+        effort: 7,
+    },
+    JxlPreset {
+        name: "Fast",
+        tip: "Distance 1.0, effort 3.\nSame quality as the default, several times faster; a few % larger.",
+        lossless: false,
+        distance: 1.0,
+        effort: 3,
+    },
+];
+
+/// True when the dialog's current settings match a preset (the encoder ignores
+/// distance in lossless mode, so it is only compared for lossy presets).
+fn preset_active(j: &JxlSaveOptions, p: &JxlPreset) -> bool {
+    j.effort == p.effort && j.lossless == p.lossless && (p.lossless || j.distance == p.distance)
+}
+
 fn jxl_options(ui: &mut egui::Ui, j: &mut JxlSaveOptions) {
-    ui.checkbox(&mut j.lossless, "Lossless (pixel-perfect, larger file)")
-        .on_hover_text("Decoded pixels are encoded with zero loss.");
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Presets:");
+        for p in JXL_PRESETS {
+            let text = if preset_active(j, p) {
+                egui::RichText::new(p.name).strong()
+            } else {
+                egui::RichText::new(p.name)
+            };
+            if ui
+                .add(egui::Button::new(text).small())
+                .on_hover_text(p.tip)
+                .clicked()
+            {
+                j.lossless = p.lossless;
+                j.distance = p.distance;
+                j.effort = p.effort;
+            }
+        }
+    });
+    if ui
+        .checkbox(&mut j.lossless, "Lossless (pixel-perfect, larger file)")
+        .on_hover_text("Decoded pixels are encoded with zero loss.")
+        .changed()
+        && !j.lossless
+        && j.distance < 0.05
+    {
+        // Returning from the Lossless preset: restore a sane lossy distance.
+        j.distance = 1.0;
+    }
     ui.add_enabled_ui(!j.lossless, |ui| {
         ui.horizontal(|ui| {
             ui.label("Distance:");

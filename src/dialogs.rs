@@ -48,12 +48,21 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                     (SaveFormat::Jpeg, "JPEG"),
                     (SaveFormat::Bmp, "BMP"),
                     (SaveFormat::Tiff, "TIFF"),
+                    (SaveFormat::Gif, "GIF"),
                 ] {
                     if ui.selectable_label(dlg.format == f, label).clicked() {
                         dlg.format = f;
                     }
                 }
             });
+            if dlg.format == SaveFormat::Gif {
+                let animated = app.doc.as_ref().is_some_and(|d| d.anim.is_some());
+                if animated {
+                    ui.label("The open animation will be saved as an animated GIF (all frames).");
+                } else {
+                    ui.label("Saves the current frame as a still GIF.");
+                }
+            }
             ui.add_space(8.0);
 
             match dlg.format {
@@ -74,6 +83,7 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                             SaveFormat::Png => SaveOptions::Png,
                             SaveFormat::Bmp => SaveOptions::Bmp,
                             SaveFormat::Tiff => SaveOptions::Tiff,
+                            SaveFormat::Gif => SaveOptions::Gif,
                         };
                         consumed = true;
                         save_with_picker(app, dlg.format, opts);
@@ -109,6 +119,7 @@ fn save_with_picker(app: &mut App, format: SaveFormat, opts: SaveOptions) {
         SaveFormat::Jpeg => ("JPEG", &["jpg", "jpeg"]),
         SaveFormat::Bmp => ("BMP", &["bmp"]),
         SaveFormat::Tiff => ("TIFF", &["tif", "tiff"]),
+        SaveFormat::Gif => ("GIF", &["gif"]),
     };
     dialog = dialog.add_filter(name, exts);
     if let Some(src) = app.doc.as_ref().and_then(|d| d.path.as_ref()) {
@@ -132,6 +143,7 @@ fn format_ext(f: SaveFormat) -> &'static str {
         SaveFormat::Jpeg => "jpg",
         SaveFormat::Bmp => "bmp",
         SaveFormat::Tiff => "tiff",
+        SaveFormat::Gif => "gif",
     }
 }
 

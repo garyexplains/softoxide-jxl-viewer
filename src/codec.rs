@@ -137,6 +137,8 @@ pub struct LoadedImage {
 pub struct Animation {
     pub frames: Vec<Raster>,
     pub durations_ms: Vec<u32>,
+    /// Loop count from the container (0 = loop forever).
+    pub loops: u32,
 }
 
 impl Animation {
@@ -471,6 +473,13 @@ fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         .as_ref()
         .map(|a| (a.tps_numerator, a.tps_denominator))
         .unwrap_or((1000, 1));
+    let loops = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|a| a.num_loops)
+        .unwrap_or(0);
 
     let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
     let mut frames = Vec::with_capacity(n);
@@ -496,6 +505,7 @@ fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         animation: Some(Animation {
             frames,
             durations_ms,
+            loops,
         }),
     })
 }
@@ -538,6 +548,13 @@ fn decode_jxl_anim_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<Load
         .as_ref()
         .map(|a| (a.tps_numerator, a.tps_denominator))
         .unwrap_or((1000, 1));
+    let loops = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|a| a.num_loops)
+        .unwrap_or(0);
 
     let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
     let mut frames = Vec::with_capacity(n);
@@ -563,6 +580,7 @@ fn decode_jxl_anim_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<Load
         animation: Some(Animation {
             frames,
             durations_ms,
+            loops,
         }),
     })
 }
@@ -817,6 +835,7 @@ pub enum SaveOptions {
     Png,
     Bmp,
     Tiff,
+    Gif,
 }
 
 pub fn encode_to_vec(raster: &Raster, opts: &SaveOptions) -> Result<Vec<u8>, String> {
@@ -826,12 +845,59 @@ pub fn encode_to_vec(raster: &Raster, opts: &SaveOptions) -> Result<Vec<u8>, Str
         SaveOptions::Png => encode_png(raster),
         SaveOptions::Bmp => encode_bmp(raster),
         SaveOptions::Tiff => encode_tiff(raster),
+        // Still image GIF (a single frame, short delay). Animated exports go
+        // through `save_animation_to_path`.
+        SaveOptions::Gif => encode_gif(std::slice::from_ref(raster), &[100], 0),
     }
 }
 
 pub fn save_to_path(path: &Path, raster: &Raster, opts: &SaveOptions) -> Result<(), String> {
     let buf = encode_to_vec(raster, opts)?;
     std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Saves an animation as an animated GIF (or a still GIF when one frame).
+pub fn save_animation_to_path(
+    path: &Path,
+    frames: &[Raster],
+    durations_ms: &[u32],
+    loops: u32,
+) -> Result<(), String> {
+    let buf = encode_gif(frames, durations_ms, loops)?;
+    std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Encodes frames as GIF (8-bit indexed, ≤256 colors per frame — the encoder
+/// quantizes automatically). Delays are milliseconds; `loops` 0 = forever.
+fn encode_gif(frames: &[Raster], durations_ms: &[u32], loops: u32) -> Result<Vec<u8>, String> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame};
+
+    if frames.is_empty() {
+        return Err("gif: no frames".into());
+    }
+    let mut out = Vec::new();
+    let mut enc = GifEncoder::new(std::io::Cursor::new(&mut out));
+    enc.set_repeat(if loops == 0 {
+        Repeat::Infinite
+    } else {
+        Repeat::Finite(loops.clamp(1, u16::MAX as u32) as u16)
+    })
+    .map_err(|e| format!("gif repeat: {e}"))?;
+
+    for (i, frame) in frames.iter().enumerate() {
+        let dur = durations_ms.get(i).copied().unwrap_or(100).max(10);
+        let rgba = frame.to_rgba8_rgba();
+        let img = image::RgbaImage::from_raw(frame.width, frame.height, rgba)
+            .ok_or_else(|| "gif: frame buffer size mismatch".to_string())?;
+        // image's GifEncoder divides the integer ms ratio by 10 to get GIF's
+        // 10-ms units — the ratio must be whole milliseconds.
+        let delay = Delay::from_numer_denom_ms(dur, 1);
+        enc.encode_frame(Frame::from_parts(img, 0, 0, delay))
+            .map_err(|e| format!("gif encode frame {i}: {e}"))?;
+    }
+    drop(enc); // writes the GIF trailer
+    Ok(out)
 }
 
 pub fn encode_jxl(raster: &Raster, opts: &JxlSaveOptions) -> Result<Vec<u8>, String> {

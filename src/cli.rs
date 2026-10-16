@@ -135,9 +135,27 @@ pub fn convert_one(input: &Path, output: &Path, opts: &ConvertOptions) -> Result
         }
         "bmp" => codec::SaveOptions::Bmp,
         "tif" | "tiff" => codec::SaveOptions::Tiff,
+        "gif" => codec::SaveOptions::Gif,
         other => return Err(format!("conversion to .{other} is not supported")),
     };
 
+    // Animated inputs save as animated GIFs; stills as single-frame GIFs.
+    if matches!(save_opts, codec::SaveOptions::Gif) {
+        if let Some(anim) = &img.animation {
+            codec::save_animation_to_path(output, &anim.frames, &anim.durations_ms, anim.loops)?;
+            let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+            return Ok(format!(
+                "converted {} ({} {}×{}, {} frames) → {} ({} bytes, animated GIF)",
+                input.display(),
+                img.format.as_str(),
+                raster.width,
+                raster.height,
+                anim.frame_count(),
+                output.display(),
+                size
+            ));
+        }
+    }
     codec::save_to_path(output, &raster, &save_opts)?;
     let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     Ok(format!(

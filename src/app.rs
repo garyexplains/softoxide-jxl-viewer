@@ -36,6 +36,7 @@ pub(crate) struct Document {
 pub(crate) struct AnimPlayer {
     pub frames: Vec<Raster>,
     pub durations_ms: Vec<u32>,
+    pub loops: u32,
     pub frame_idx: usize,
     pub playing: bool,
     pub frame_started: std::time::Instant,
@@ -67,6 +68,7 @@ pub enum SaveFormat {
     Jpeg,
     Bmp,
     Tiff,
+    Gif,
 }
 
 pub(crate) struct SaveDialogState {
@@ -264,6 +266,7 @@ impl App {
                     anim: img.animation.map(|a| AnimPlayer {
                         frames: a.frames,
                         durations_ms: a.durations_ms,
+                        loops: a.loops,
                         frame_idx: 0,
                         playing: true,
                         frame_started: std::time::Instant::now(),
@@ -320,10 +323,21 @@ impl App {
         self.status.clear();
         self.save_dialog = None;
         let raster = doc.raster;
+        // Animated GIF export needs every frame; other formats (and still
+        // images) encode the current raster only.
+        let anim = if matches!(opts, SaveOptions::Gif) {
+            doc.anim.map(|a| (a.frames, a.durations_ms, a.loops))
+        } else {
+            None
+        };
         std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                codec::save_to_path(&path, &raster, &opts)
-            }));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match (anim, &opts) {
+                    (Some((frames, durations_ms, loops)), SaveOptions::Gif) => {
+                        codec::save_animation_to_path(&path, &frames, &durations_ms, loops)
+                    }
+                    _ => codec::save_to_path(&path, &raster, &opts),
+                }));
             let msg = match result {
                 Ok(Ok(())) => UiMsg::Done(Ok(format!(
                     "Saved {} ({})",
@@ -382,6 +396,7 @@ fn describe_opts(opts: &SaveOptions) -> String {
         SaveOptions::Png => "PNG".into(),
         SaveOptions::Bmp => "BMP".into(),
         SaveOptions::Tiff => "TIFF".into(),
+        SaveOptions::Gif => "GIF".into(),
     }
 }
 

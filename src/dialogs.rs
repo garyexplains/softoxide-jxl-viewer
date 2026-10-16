@@ -6,6 +6,7 @@ use egui::Align2;
 
 use crate::app::{App, SaveFormat};
 use crate::codec::{JpegSaveOptions, JxlSaveOptions, SaveOptions};
+use crate::icons;
 use crate::raster::ResizeFilter;
 
 pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
@@ -179,7 +180,7 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
     let mut open = true;
     let mut resized_now = false;
 
-    egui::Window::new("Resize image")
+    egui::Window::new(format!("{}  Resize image", icons::ARROWS_OUT_CARDINAL))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -194,7 +195,11 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
                         .range(1..=20000)
                         .suffix("px"),
                 );
-                if ui.button("⇄").clicked() {
+                if ui
+                    .button(icons::SWAP)
+                    .on_hover_text("Swap width and height")
+                    .clicked()
+                {
                     std::mem::swap(&mut d.width, &mut d.height);
                 }
                 ui.add(
@@ -224,13 +229,16 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("⤢  Resize").clicked() {
+                if ui
+                    .button(format!("{}  Resize", icons::CHECK_CIRCLE))
+                    .clicked()
+                {
                     let (w, h) = (d.width as u32, d.height as u32);
                     let filt = d.filter;
                     app.apply_edit(ctx, move |r| r.resized(w, h, filt));
                     resized_now = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
                     app.resize_dialog = None;
                 }
             });

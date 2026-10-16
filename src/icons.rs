@@ -27,6 +27,7 @@ pub const CHECK_CIRCLE: &str = "\u{E184}";
 pub const X_CIRCLE: &str = "\u{E4F8}";
 pub const ARROWS_HORIZONTAL: &str = "\u{EB06}";
 pub const ARROWS_VERTICAL: &str = "\u{EB04}";
+pub const SWAP: &str = "\u{E83C}";
 
 /// Registers the vendored Phosphor font as a proportional-text fallback.
 pub fn add_to_fonts(fonts: &mut eframe::egui::FontDefinitions) {

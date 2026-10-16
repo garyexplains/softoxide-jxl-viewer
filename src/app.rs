@@ -894,7 +894,12 @@ impl App {
                 {
                     self.anim_step(-1, ctx);
                 }
-                ui.label(format!("{}/{}", frame_idx + 1, frame_count));
+                // Fixed-size allocation: the counter would otherwise reflow the
+                // toolbar every time it crosses between 1 and 2 digits.
+                ui.add_sized(
+                    [64.0, 18.0],
+                    egui::Label::new(format!("{}/{}", frame_idx + 1, frame_count)),
+                );
                 if ui
                     .button(icons::SKIP_FORWARD)
                     .on_hover_text("Next frame (.)")
@@ -986,8 +991,9 @@ impl App {
                 Some(z) => format!("{} {:.0}%", icons::MAGNIFYING_GLASS_PLUS, z * 100.0),
                 None => format!("{}  fit", icons::FRAME_CORNERS),
             };
+            // Fixed width so the label changing (fit ↔ percent) doesn't reflow.
             if ui
-                .button(zoom_label)
+                .add_sized([78.0, 18.0], egui::Button::new(zoom_label))
                 .on_hover_text("Fit to window (0); mouse wheel zooms at the pointer")
                 .clicked()
             {

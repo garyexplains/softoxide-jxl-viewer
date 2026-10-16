@@ -1932,6 +1932,7 @@ dependencies = [
  "eframe",
  "fast_image_resize",
  "filetime",
+ "gif",
  "image",
  "jpeg-encoder",
  "jxl-native",

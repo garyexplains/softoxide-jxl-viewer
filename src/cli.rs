@@ -139,13 +139,22 @@ pub fn convert_one(input: &Path, output: &Path, opts: &ConvertOptions) -> Result
         other => return Err(format!("conversion to .{other} is not supported")),
     };
 
-    // Animated inputs save as animated GIFs; stills as single-frame GIFs.
-    if matches!(save_opts, codec::SaveOptions::Gif) {
+    // Animated inputs save as animated GIF or animated JXL.
+    if matches!(
+        save_opts,
+        codec::SaveOptions::Gif | codec::SaveOptions::Jxl(_)
+    ) {
         if let Some(anim) = &img.animation {
-            codec::save_animation_to_path(output, &anim.frames, &anim.durations_ms, anim.loops)?;
+            codec::save_animation_to_path(
+                output,
+                &anim.frames,
+                &anim.durations_ms,
+                anim.loops,
+                &save_opts,
+            )?;
             let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
             return Ok(format!(
-                "converted {} ({} {}×{}, {} frames) → {} ({} bytes, animated GIF)",
+                "converted {} ({} {}×{}, {} frames) → {} ({} bytes, animated)",
                 input.display(),
                 img.format.as_str(),
                 raster.width,

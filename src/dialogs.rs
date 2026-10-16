@@ -55,11 +55,24 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                     }
                 }
             });
-            if dlg.format == SaveFormat::Gif {
+            if dlg.format == SaveFormat::Gif || dlg.format == SaveFormat::Jxl {
                 let animated = app.doc.as_ref().is_some_and(|d| d.anim.is_some());
+                let frames = app
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.anim.as_ref())
+                    .map(|a| a.frame_count())
+                    .unwrap_or(0);
                 if animated {
-                    ui.label("The open animation will be saved as an animated GIF (all frames).");
-                } else {
+                    let fmt = if dlg.format == SaveFormat::Gif {
+                        "GIF"
+                    } else {
+                        "JPEG XL"
+                    };
+                    ui.label(format!(
+                        "The open animation ({frames} frames) will be saved as an animated {fmt}."
+                    ));
+                } else if dlg.format == SaveFormat::Gif {
                     ui.label("Saves the current frame as a still GIF.");
                 }
             }

@@ -170,6 +170,7 @@ pub fn decode_from_bytes(bytes: &[u8], ext_hint: Option<&str>) -> Result<LoadedI
     let format = detect_format(bytes, ext_hint);
     match format {
         Format::Jxl => decode_jxl(bytes),
+        Format::Gif => decode_gif(bytes),
         Format::Unknown => Err("unknown file format".to_string()),
         _ => decode_with_image_crate(bytes, format, ext_hint),
     }
@@ -386,6 +387,115 @@ fn hdr_frame_raster(
     };
 
     Raster::from_rgba8(width, height, has_alpha, data)
+}
+
+/// GIF decode (static or animated) with proper frame compositing: each frame
+/// is alpha-blended onto a canvas, GIF disposal methods (keep / background /
+/// previous) are honored, and delays/loop count are preserved.
+fn decode_gif(bytes: &[u8]) -> Result<LoadedImage, String> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut reader = options
+        .read_info(Cursor::new(bytes))
+        .map_err(|e| format!("gif header: {e}"))?;
+    let width = reader.width() as u32;
+    let height = reader.height() as u32;
+    let loops = match reader.repeat() {
+        gif::Repeat::Infinite => 0,
+        gif::Repeat::Finite(n) => n as u32,
+    };
+
+    let canvas_len = width as usize * height as usize * 4;
+    let mut canvas = vec![0u8; canvas_len];
+    let mut saved_canvas: Option<Vec<u8>> = None;
+    let mut frames: Vec<Raster> = Vec::new();
+    let mut durations_ms: Vec<u32> = Vec::new();
+
+    while frames.len() < MAX_ANIM_FRAMES {
+        let frame = match reader
+            .read_next_frame()
+            .map_err(|e| format!("gif frame {}: {e}", frames.len()))?
+        {
+            Some(f) => f,
+            None => break,
+        };
+
+        // Snapshot for "restore to previous" disposal.
+        if matches!(frame.dispose, gif::DisposalMethod::Previous) {
+            saved_canvas = Some(canvas.clone());
+        }
+
+        // Composite the frame's sub-rect onto the canvas (straight alpha-over).
+        let fw = frame.width as usize;
+        let fx = frame.left as usize;
+        let fy = frame.top as usize;
+        for ry in 0..frame.height as usize {
+            for rx in 0..fw {
+                let s = (ry * fw + rx) * 4;
+                let src = &frame.buffer[s..s + 4];
+                let d = ((fy + ry) * width as usize + fx + rx) * 4;
+                let a = src[3] as u32;
+                let ia = 255 - a;
+                for c in 0..3 {
+                    canvas[d + c] = ((src[c] as u32 * a + canvas[d + c] as u32 * ia) / 255) as u8;
+                }
+                canvas[d + 3] = ((a * 255 + canvas[d + 3] as u32 * ia) / 255) as u8;
+            }
+        }
+
+        // The displayed state of this frame.
+        frames.push(Raster::from_rgba8(width, height, true, canvas.clone()));
+        // GIF delay is in 10 ms units; 0 traditionally displays ~100 ms.
+        durations_ms.push(if frame.delay == 0 {
+            100
+        } else {
+            frame.delay as u32 * 10
+        });
+
+        // Disposal prepares the canvas for the next frame.
+        match frame.dispose {
+            gif::DisposalMethod::Background => {
+                for ry in 0..frame.height as usize {
+                    let d = ((fy + ry) * width as usize + fx) * 4;
+                    canvas[d..d + fw * 4].fill(0);
+                }
+            }
+            gif::DisposalMethod::Previous => {
+                if let Some(saved) = saved_canvas.take() {
+                    canvas = saved;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if frames.is_empty() {
+        return Err("gif: no frames".into());
+    }
+    if frames.len() == 1 {
+        return Ok(LoadedImage {
+            raster: frames.pop().unwrap(),
+            format: Format::Gif,
+            via_fallback: false,
+            note: None,
+            hdr: None,
+            animation: None,
+        });
+    }
+
+    let raster = frames[0].clone();
+    Ok(LoadedImage {
+        raster,
+        format: Format::Gif,
+        via_fallback: false,
+        note: None,
+        hdr: None,
+        animation: Some(Animation {
+            frames,
+            durations_ms,
+            loops,
+        }),
+    })
 }
 
 fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
@@ -856,15 +966,78 @@ pub fn save_to_path(path: &Path, raster: &Raster, opts: &SaveOptions) -> Result<
     std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Saves an animation as an animated GIF (or a still GIF when one frame).
+/// Saves an animation. GIF → animated GIF; JPEG XL → animated JXL
+/// (lossless/lossy per the JXL options). Other formats are rejected.
 pub fn save_animation_to_path(
     path: &Path,
     frames: &[Raster],
     durations_ms: &[u32],
     loops: u32,
+    opts: &SaveOptions,
 ) -> Result<(), String> {
-    let buf = encode_gif(frames, durations_ms, loops)?;
+    let buf = match opts {
+        SaveOptions::Gif => encode_gif(frames, durations_ms, loops)?,
+        SaveOptions::Jxl(j) => encode_anim_jxl(frames, durations_ms, loops, j)?,
+        other => return Err(format!("{:?} does not support animated save", other)),
+    };
     std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Encodes frames as an animated JPEG XL (sRGB; lossless or lossy per the
+/// options; alpha preserved unless `keep_alpha` is off).
+pub fn encode_anim_jxl(
+    frames: &[Raster],
+    durations_ms: &[u32],
+    loops: u32,
+    opts: &JxlSaveOptions,
+) -> Result<Vec<u8>, String> {
+    use crate::raster::Samples;
+
+    let Some(first) = frames.first() else {
+        return Err("animation encode: no frames".into());
+    };
+    if frames
+        .iter()
+        .any(|f| f.width != first.width || f.height != first.height)
+    {
+        return Err("animation encode: frames must share one size".into());
+    }
+    let has_alpha = first.has_alpha && opts.keep_alpha;
+
+    let pixels: Vec<jxl_native::Pixels> = frames
+        .iter()
+        .map(|f| match (&f.data, has_alpha, f.has_alpha) {
+            (Samples::U8(v), true, _) => jxl_native::Pixels::U8(v.clone()),
+            (Samples::U8(v), false, _) => jxl_native::Pixels::U8(if f.has_alpha {
+                drop_alpha_to_rgb(v)
+            } else {
+                v.clone()
+            }),
+            (Samples::U16(v), true, _) => jxl_native::Pixels::U16(v.clone()),
+            (Samples::U16(v), false, _) => jxl_native::Pixels::U16(if f.has_alpha {
+                drop_alpha_to_rgb(v)
+            } else {
+                v.clone()
+            }),
+        })
+        .collect();
+
+    jxl_native::encode_anim_dynamic(jxl_native::AnimEncodeInput {
+        width: first.width,
+        height: first.height,
+        has_alpha,
+        frames: pixels,
+        durations_ms: durations_ms.to_vec(),
+        loops,
+        options: jxl_native::EncodeOptions {
+            lossless: opts.lossless,
+            distance: opts.distance,
+            effort: opts.effort,
+            modular: if opts.modular { Some(true) } else { None },
+            group_size: opts.group_size,
+        },
+    })
+    .map_err(|e| format!("jpeg xl animation encode: {e}"))
 }
 
 /// Encodes frames as GIF (8-bit indexed, ≤256 colors per frame — the encoder

@@ -30,6 +30,9 @@ jpeg-encoder = "0.6"
 # Native file dialogs (open/save pickers only; no image support from OS)
 rfd = "0.15"
 
+# Animated GIF decode (full disposal/blend handling)
+gif = "0.14"
+
 [dev-dependencies]
 filetime = "0.2"
 png = "0.18"

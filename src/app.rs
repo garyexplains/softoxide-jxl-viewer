@@ -323,9 +323,9 @@ impl App {
         self.status.clear();
         self.save_dialog = None;
         let raster = doc.raster;
-        // Animated GIF export needs every frame; other formats (and still
-        // images) encode the current raster only.
-        let anim = if matches!(opts, SaveOptions::Gif) {
+        // Animated exports need every frame; only GIF and JPEG XL support
+        // them — other formats encode the current raster only.
+        let anim = if matches!(opts, SaveOptions::Gif | SaveOptions::Jxl(_)) {
             doc.anim.map(|a| (a.frames, a.durations_ms, a.loops))
         } else {
             None
@@ -333,9 +333,10 @@ impl App {
         std::thread::spawn(move || {
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match (anim, &opts) {
-                    (Some((frames, durations_ms, loops)), SaveOptions::Gif) => {
-                        codec::save_animation_to_path(&path, &frames, &durations_ms, loops)
-                    }
+                    (
+                        Some((frames, durations_ms, loops)),
+                        SaveOptions::Gif | SaveOptions::Jxl(_),
+                    ) => codec::save_animation_to_path(&path, &frames, &durations_ms, loops, &opts),
                     _ => codec::save_to_path(&path, &raster, &opts),
                 }));
             let msg = match result {

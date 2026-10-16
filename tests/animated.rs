@@ -106,8 +106,14 @@ fn animated_jxl_saves_as_animated_gif() {
     let dir = std::env::temp_dir().join(format!("jxlviewer-gif-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let gif_path = dir.join("out.gif");
-    codec::save_animation_to_path(&gif_path, &anim.frames, &anim.durations_ms, anim.loops)
-        .expect("gif save");
+    codec::save_animation_to_path(
+        &gif_path,
+        &anim.frames,
+        &anim.durations_ms,
+        anim.loops,
+        &codec::SaveOptions::Gif,
+    )
+    .expect("gif save");
 
     let gif_bytes = std::fs::read(&gif_path).unwrap();
     use image::{AnimationDecoder as _, ImageDecoder as _};
@@ -138,6 +144,108 @@ fn animated_jxl_saves_as_animated_gif() {
             }
         }
         assert!(max_delta <= 24, "frame {idx} color drift {max_delta}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gif_to_jxl_roundtrip() {
+    // Animated JXL → animated GIF (image crate encoder, quantized) → our GIF
+    // decoder (disposal-aware) → animated JXL again. Colors must survive to
+    // within quantization tolerance in the GIF stage and exactly in the final
+    // lossless JXL.
+    const W: u32 = 40;
+    const H: u32 = 30;
+    const COLORS: [[u8; 3]; 4] = [[200, 40, 40], [40, 200, 40], [40, 40, 200], [220, 200, 40]];
+    let frames: Vec<jxl_native::Pixels> = COLORS
+        .iter()
+        .map(|rgb| match &solid_frame(W, H, *rgb).data {
+            jxlviewer::raster::Samples::U8(v) => jxl_native::Pixels::U8(v.clone()),
+            _ => unreachable!(),
+        })
+        .collect();
+    let jxl1 = jxl_native::encode_anim_dynamic(jxl_native::AnimEncodeInput {
+        width: W,
+        height: H,
+        has_alpha: false,
+        frames,
+        durations_ms: vec![100; 4],
+        loops: 7,
+        options: jxl_native::EncodeOptions {
+            lossless: true,
+            effort: 3,
+            ..Default::default()
+        },
+    })
+    .expect("encode anim jxl");
+
+    // Stage 1: decode the animated JXL.
+    let img1 = codec::decode_from_bytes(&jxl1, Some("jxl")).expect("decode anim jxl");
+    let anim1 = img1.animation.expect("animation");
+    assert_eq!(anim1.frame_count(), 4);
+    assert_eq!(anim1.loops, 7);
+
+    // Stage 2: save as animated GIF.
+    let dir = std::env::temp_dir().join(format!("jxlviewer-gif2jxl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gif_path = dir.join("mid.gif");
+    codec::save_animation_to_path(
+        &gif_path,
+        &anim1.frames,
+        &anim1.durations_ms,
+        anim1.loops,
+        &codec::SaveOptions::Gif,
+    )
+    .expect("gif save");
+
+    // Stage 3: open the GIF — must come back as an animation.
+    let gif_bytes = std::fs::read(&gif_path).unwrap();
+    let img2 = codec::decode_from_bytes(&gif_bytes, Some("gif")).expect("decode gif");
+    let anim2 = img2.animation.expect("GIF should decode as animation");
+    assert_eq!(anim2.frame_count(), 4);
+    assert_eq!(anim2.loops, 7, "loop count preserved");
+    for (i, d) in anim2.durations_ms.iter().enumerate() {
+        assert!((90..=110).contains(d), "frame {i} delay {d} ms");
+    }
+    for (idx, frame) in anim2.frames.iter().enumerate() {
+        let px = frame.to_rgba8_rgba();
+        let want = COLORS[idx];
+        let mut max_delta = 0u8;
+        for p in px.chunks_exact(4) {
+            for c in 0..3 {
+                max_delta = max_delta.max(p[c].abs_diff(want[c]));
+            }
+        }
+        assert!(
+            max_delta <= 24,
+            "GIF frame {idx} quantization drift {max_delta}"
+        );
+    }
+
+    // Stage 4: save the GIF's frames as an animated (lossless) JXL.
+    let jxl2 = codec::encode_anim_jxl(
+        &anim2.frames,
+        &anim2.durations_ms,
+        anim2.loops,
+        &codec::JxlSaveOptions {
+            lossless: true,
+            effort: 3,
+            ..Default::default()
+        },
+    )
+    .expect("re-encode anim jxl");
+
+    // Stage 5: the new JXL must carry the same animation (exact colors now).
+    let img3 = codec::decode_from_bytes(&jxl2, Some("jxl")).expect("decode re-encoded jxl");
+    let anim3 = img3.animation.expect("animation after re-encode");
+    assert_eq!(anim3.frame_count(), 4);
+    assert_eq!(anim3.loops, 7);
+    for (idx, frame) in anim3.frames.iter().enumerate() {
+        let px = frame.to_rgba8_rgba();
+        let want = COLORS[idx];
+        for p in px.chunks_exact(4) {
+            assert_eq!(&p[0..3], want, "lossless JXL frame {idx} must be exact");
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -84,6 +84,8 @@ pub struct App {
     pub(crate) last_dir: Option<PathBuf>,
     pub(crate) status: String,
     pub(crate) error: Option<String>,
+    /// File this session was opened with; Home returns here.
+    pub(crate) original_path: Option<PathBuf>,
 
     pub(crate) texture: Option<TextureHandle>,
     pub(crate) texture_nearest: bool,
@@ -117,6 +119,7 @@ impl App {
             last_dir: None,
             status: String::new(),
             error: None,
+            original_path: None,
             texture: None,
             texture_nearest: false,
             needs_rebuild: true,
@@ -206,6 +209,13 @@ impl App {
     }
 
     // ---- io ----------------------------------------------------------------
+
+    /// Explicitly opens a file the user asked for (dialog, CLI argument, drag
+    /// & drop). Becomes the session anchor that Home returns to.
+    pub(crate) fn open_explicit(&mut self, path: PathBuf) {
+        self.original_path = Some(path.clone());
+        self.open_path(path);
+    }
 
     pub(crate) fn open_path(&mut self, path: PathBuf) {
         match codec::decode_file(&path) {
@@ -329,6 +339,11 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
+/// Case-insensitive full-path comparison (Windows-friendly).
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().to_lowercase()
+}
+
 fn build_checker_texture(ctx: &egui::Context) -> TextureHandle {
     let mut px = Vec::with_capacity(16 * 16 * 4);
     let (c0, c1) = ([46u8, 46, 50, 255], [58u8, 58, 64, 255]);
@@ -355,7 +370,7 @@ impl eframe::App for App {
         self.poll_messages(ctx);
 
         if let Some(path) = self.pending_open.take() {
-            self.open_path(path);
+            self.open_explicit(path);
             ctx.request_repaint();
         }
 
@@ -367,7 +382,7 @@ impl eframe::App for App {
                 .collect()
         });
         if let Some(first) = dropped.first() {
-            self.open_path(first.clone());
+            self.open_explicit(first.clone());
             ctx.request_repaint();
         }
     }
@@ -396,16 +411,18 @@ impl eframe::App for App {
 impl App {
     /// Arrow-key folder navigation while viewing a file:
     /// Left/Right = previous/next image alphabetically, Up/Down = by mtime.
+    /// Home returns to the file this session was opened with.
     fn handle_nav_keys(&mut self, ctx: &egui::Context) {
-        let (left, right, up, down) = ctx.input(|i| {
+        let (left, right, up, down, home) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowLeft),
                 i.key_pressed(egui::Key::ArrowRight),
                 i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Home),
             )
         });
-        if !(left || right || up || down) {
+        if !(left || right || up || down || home) {
             return;
         }
         // Don't hijack arrows while a text field has focus or a dialog is up.
@@ -414,6 +431,21 @@ impl App {
         {
             return;
         }
+
+        if home {
+            if let Some(original) = self.original_path.clone() {
+                let viewing_original = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.path.as_ref())
+                    .is_some_and(|p| path_key(p) == path_key(&original));
+                if !viewing_original && original.exists() {
+                    self.open_path(original);
+                }
+            }
+            return;
+        }
+
         let Some(doc) = &self.doc else { return };
         let Some(path) = doc.path.clone() else { return };
         let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
@@ -630,7 +662,7 @@ impl App {
             ],
         );
         if let Some(path) = dialog.pick_file() {
-            self.open_path(path);
+            self.open_explicit(path);
         }
     }
 

@@ -155,4 +155,31 @@ mod tests {
         assert!(neighbor_by_name(&dir, &ghost, true).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn files_added_after_opening_are_picked_up() {
+        let dir = scratch("added");
+        touch(&dir, "a.png", None);
+        touch(&dir, "b.png", None);
+        let cur = dir.join("a.png");
+
+        // "Session" starts; next is b.
+        let next = neighbor_by_name(&dir, &cur, true).unwrap();
+        assert_eq!(next.file_name().unwrap().to_str().unwrap(), "b.png");
+
+        // A new file appears in the folder afterwards — the fresh directory
+        // listing must include it in the ordering (a → a2 → b).
+        touch(&dir, "a2_middle.png", None);
+        let next2 = neighbor_by_name(&dir, &cur, true).unwrap();
+        assert_eq!(
+            next2.file_name().unwrap().to_str().unwrap(),
+            "a2_middle.png"
+        );
+
+        // And a deleted file disappears from the ordering (a2 wraps to a).
+        fs::remove_file(&next).unwrap();
+        let next3 = neighbor_by_name(&dir, &next2, true).unwrap();
+        assert_eq!(next3.file_name().unwrap().to_str().unwrap(), "a.png");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

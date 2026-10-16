@@ -16,7 +16,9 @@ views. It runs unchanged on Windows, macOS and Linux.
   Pixel snapping at high zoom, linear filtering otherwise.
 - **Keyboard folder navigation** while viewing a file: `←`/`→` move to the previous/next
   recognized image in the same folder **alphabetically**; `↑`/`↓` move by **file modification
-  time**. Both wrap around at the ends.
+  time**. Both wrap around at the ends. `Home` returns to the file the session was opened
+  with. The folder listing is refreshed on every keystroke, so files added or removed while
+  browsing are picked up immediately.
 
 ### Editing
 - **Crop** (drag a selection, live size readout), **resize** with real resamplers

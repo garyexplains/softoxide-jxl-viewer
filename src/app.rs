@@ -375,6 +375,7 @@ impl eframe::App for App {
     /// Draw the whole app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_nav_keys(&ctx);
         self.refresh_texture(&ctx);
 
         egui::Panel::top("toolbar")
@@ -393,6 +394,46 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Arrow-key folder navigation while viewing a file:
+    /// Left/Right = previous/next image alphabetically, Up/Down = by mtime.
+    fn handle_nav_keys(&mut self, ctx: &egui::Context) {
+        let (left, right, up, down) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        if !(left || right || up || down) {
+            return;
+        }
+        // Don't hijack arrows while a text field has focus or a dialog is up.
+        if ctx.egui_wants_keyboard_input()
+            || (self.save_dialog.is_some() || self.resize_dialog.is_some())
+        {
+            return;
+        }
+        let Some(doc) = &self.doc else { return };
+        let Some(path) = doc.path.clone() else { return };
+        let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
+            return;
+        };
+
+        let target = if left {
+            crate::nav::neighbor_by_name(&dir, &path, false)
+        } else if right {
+            crate::nav::neighbor_by_name(&dir, &path, true)
+        } else if up {
+            crate::nav::neighbor_by_date(&dir, &path, false)
+        } else {
+            crate::nav::neighbor_by_date(&dir, &path, true)
+        };
+        if let Some(target) = target {
+            self.open_path(target);
+        }
+    }
+
     fn effective_zoom(&self, avail: Vec2, img: Vec2) -> f32 {
         self.viewer.zoom.unwrap_or_else(|| fit_zoom(avail, img))
     }

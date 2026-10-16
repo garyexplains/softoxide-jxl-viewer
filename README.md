@@ -14,6 +14,9 @@ views. It runs unchanged on Windows, macOS and Linux.
 - Pure-Rust JXL decode with **color management to sRGB** (moxcms) — CMYK/ICC-profile files render.
 - Zoom (wheel at pointer), pan (drag), fit / 1:1, checkerboard behind transparency.
   Pixel snapping at high zoom, linear filtering otherwise.
+- **Keyboard folder navigation** while viewing a file: `←`/`→` move to the previous/next
+  recognized image in the same folder **alphabetically**; `↑`/`↓` move by **file modification
+  time**. Both wrap around at the ends.
 
 ### Editing
 - **Crop** (drag a selection, live size readout), **resize** with real resamplers
@@ -83,6 +86,7 @@ src/
   raster.rs   Raster pixel buffer (RGB/RGBA, 8/16-bit), crop/rotate/flip/resize
   codec.rs    format sniffing, decode dispatch, save encoders
   icons.rs    vendored Phosphor icon font (assets/fonts/Phosphor.ttf)
+  nav.rs      folder navigation: prev/next image by name or mtime
 jxl-native/   permissively-licensed libjxl FFI (encode + basic decode), vendored cmake build
 third_party/  fetched libjxl checkout (not committed)
 ```

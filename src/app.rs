@@ -58,7 +58,9 @@ pub(crate) struct SaveDialogState {
 pub(crate) struct ResizeDialogState {
     pub(crate) width: i32,
     pub(crate) height: i32,
+    /// Aspect ratio (width/height) that "Keep aspect ratio" maintains.
     pub(crate) aspect: f32,
+    pub(crate) keep_aspect: bool,
     pub(crate) filter: ResizeFilter,
 }
 
@@ -616,6 +618,7 @@ impl App {
                     width: w as i32,
                     height: h as i32,
                     aspect: w as f32 / h as f32,
+                    keep_aspect: true,
                     filter: ResizeFilter::default(),
                 });
             }

@@ -9,6 +9,23 @@ use crate::codec::{JpegSaveOptions, JxlSaveOptions, SaveOptions};
 use crate::icons;
 use crate::raster::ResizeFilter;
 
+#[cfg(test)]
+mod tests {
+    use super::RESIZE_PRESETS;
+
+    #[test]
+    fn presets_are_landscape_and_sane() {
+        for (name, w, h) in RESIZE_PRESETS {
+            assert!(w > h, "preset {name} must be landscape (w > h): {w}×{h}");
+            assert!(
+                w % 2 == 0 && h % 2 == 0,
+                "preset {name} should be even: {w}×{h}"
+            );
+            assert!(*w >= 640, "preset {name} unexpectedly small");
+        }
+    }
+}
+
 pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
     let Some(mut dlg) = app.save_dialog.take() else {
         return;
@@ -173,12 +190,28 @@ fn jpeg_options(ui: &mut egui::Ui, j: &mut JpegSaveOptions) {
     ui.label("Alpha is composited over white (JPEG has no alpha).");
 }
 
+/// Standard resolutions, always defined landscape (width > height). They are
+/// displayed swapped when the source image is portrait.
+const RESIZE_PRESETS: &[(&str, u32, u32)] = &[
+    ("VGA", 640, 480),
+    ("SVGA", 800, 600),
+    ("XGA", 1024, 768),
+    ("HD 720p", 1280, 720),
+    ("UXGA", 1600, 1200),
+    ("Full HD 1080p", 1920, 1080),
+    ("QHD 1440p", 2560, 1440),
+    ("4K UHD", 3840, 2160),
+    ("5K", 5120, 2880),
+    ("8K UHD", 7680, 4320),
+];
+
 pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
     let Some(mut d) = app.resize_dialog.take() else {
         return;
     };
     let mut open = true;
     let mut consumed = false;
+    let portrait = d.aspect < 1.0;
 
     egui::Window::new(format!("{}  Resize image", icons::ARROWS_OUT_CARDINAL))
         .open(&mut open)
@@ -186,6 +219,27 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, -40.0])
         .show(ctx, |ui| {
+            // ---- standard-resolution presets --------------------------------
+            // Shown transposed when the source is portrait, so the preset
+            // orientation follows the image.
+            ui.label("Standard resolutions:");
+            ui.horizontal_wrapped(|ui| {
+                for (name, pw, ph) in RESIZE_PRESETS {
+                    let (tw, th) = if portrait { (*ph, *pw) } else { (*pw, *ph) };
+                    let selected = d.width == tw as i32 && d.height == th as i32;
+                    if ui
+                        .selectable_label(selected, format!("{tw}×{th}"))
+                        .on_hover_text(format!("{name} ({}×{})", tw, th))
+                        .clicked()
+                    {
+                        d.width = tw as i32;
+                        d.height = th as i32;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+
+            // ---- manual size -------------------------------------------------
             ui.label("New size (px):");
             ui.horizontal(|ui| {
                 let w0 = d.width;
@@ -197,22 +251,30 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
                 );
                 if ui
                     .button(icons::SWAP)
-                    .on_hover_text("Swap width and height")
+                    .on_hover_text("Swap width and height (and the kept aspect ratio)")
                     .clicked()
                 {
                     std::mem::swap(&mut d.width, &mut d.height);
+                    d.aspect = 1.0 / d.aspect;
                 }
                 ui.add(
                     egui::DragValue::new(&mut d.height)
                         .range(1..=20000)
                         .suffix("px"),
                 );
-                if d.width != w0 {
-                    d.height = ((d.width as f32 / d.aspect).round() as i32).max(1);
-                } else if d.height != h0 {
-                    d.width = ((d.height as f32) * d.aspect).round() as i32;
+                if d.keep_aspect {
+                    if d.width != w0 {
+                        d.height = ((d.width as f32 / d.aspect).round() as i32).max(1);
+                    } else if d.height != h0 {
+                        d.width = ((d.height as f32) * d.aspect).round() as i32;
+                    }
                 }
             });
+            ui.checkbox(&mut d.keep_aspect, "Keep aspect ratio").on_hover_text(
+                "When enabled, editing one side recalculates the other from the original aspect ratio.",
+            );
+
+            // ---- filter ------------------------------------------------------
             ui.horizontal(|ui| {
                 ui.label("Filter:");
                 for (label, f) in [

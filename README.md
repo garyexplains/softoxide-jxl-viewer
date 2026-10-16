@@ -42,7 +42,8 @@ views. It runs unchanged on Windows, macOS and Linux.
 - Alpha can be preserved as a real JXL alpha channel; dropping it produces plain RGB files.
 
 > The window/url file-pickers (`rfd`) are the only OS UI surface used — they are just dialogs;
-> the image stack is entirely native/embedded.
+> the image stack is entirely native/embedded. UI icons come from the vendored Phosphor icon
+> font (`assets/fonts/Phosphor.ttf`, MIT) — no system fonts or icon themes involved.
 
 ## Building
 
@@ -74,11 +75,14 @@ cargo run --release -- convert photo.png out.jxl --lossless --group-size 256 --m
 ```
 src/
   main.rs     CLI parsing, launch of GUI or headless commands
+  lib.rs      library root (modules + GUI launcher + cli_main)
+  cli.rs      headless CLI: info, convert, help
   app.rs      eframe App: toolbar/status/dialog wiring, undo stack, jobs
   view.rs     canvas: zoom/pan math, crop overlay drawing
   dialogs.rs  Save-as (JXL options incl. tiles) and Resize windows
   raster.rs   Raster pixel buffer (RGB/RGBA, 8/16-bit), crop/rotate/flip/resize
   codec.rs    format sniffing, decode dispatch, save encoders
+  icons.rs    vendored Phosphor icon font (assets/fonts/Phosphor.ttf)
 jxl-native/   permissively-licensed libjxl FFI (encode + basic decode), vendored cmake build
 third_party/  fetched libjxl checkout (not committed)
 ```

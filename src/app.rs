@@ -10,6 +10,7 @@ use egui::{
 };
 
 use crate::codec::{self, JpegSaveOptions, JxlSaveOptions, SaveOptions};
+use crate::icons;
 use crate::raster::{Raster, RasterRect, ResizeFilter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,11 @@ const UNDO_LIMIT: usize = 5;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> App {
+        // Icon font (vendored Phosphor) as a fallback for UI glyphs.
+        let mut fonts = egui::FontDefinitions::default();
+        crate::icons::add_to_fonts(&mut fonts);
+        cc.egui_ctx.set_fonts(fonts);
+
         let checker = build_checker_texture(&cc.egui_ctx);
         App {
             doc: None,
@@ -438,17 +444,29 @@ impl App {
 
     fn show_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("📂  Open…").clicked() {
+            if ui
+                .button(format!("{}  Open…", icons::FOLDER_OPEN))
+                .clicked()
+            {
                 self.pick_open_file();
             }
             ui.separator();
 
             let has = self.doc.is_some();
-            if ui.add_enabled(has, egui::Button::new("↺  Undo")).clicked() {
+            if ui
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Undo", icons::ARROW_COUNTER_CLOCKWISE)),
+                )
+                .clicked()
+            {
                 self.undo_last(ctx);
             }
             if ui
-                .add_enabled(has && !self.redo.is_empty(), egui::Button::new("↻  Redo"))
+                .add_enabled(
+                    has && !self.redo.is_empty(),
+                    egui::Button::new(format!("{}  Redo", icons::ARROW_CLOCKWISE)),
+                )
                 .clicked()
             {
                 self.redo_last(ctx);
@@ -456,7 +474,7 @@ impl App {
             ui.separator();
 
             if ui
-                .selectable_label(self.tool == Tool::Pan, "✋  Pan")
+                .selectable_label(self.tool == Tool::Pan, format!("{}  Pan", icons::HAND_PALM))
                 .clicked()
             {
                 self.tool = Tool::Pan;
@@ -464,7 +482,7 @@ impl App {
                 self.crop_drag = None;
             }
             if ui
-                .selectable_label(self.tool == Tool::Crop, "⛶  Crop")
+                .selectable_label(self.tool == Tool::Crop, format!("{}  Crop", icons::CROP))
                 .clicked()
             {
                 self.tool = Tool::Crop;
@@ -473,25 +491,37 @@ impl App {
             }
 
             if ui
-                .add_enabled(has, egui::Button::new("⟲  Rotate L"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Rotate L", icons::ARROW_COUNTER_CLOCKWISE)),
+                )
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_ccw()));
             }
             if ui
-                .add_enabled(has, egui::Button::new("⟳  Rotate R"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Rotate R", icons::ARROW_CLOCKWISE)),
+                )
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_cw()));
             }
             if ui
-                .add_enabled(has, egui::Button::new("↔  Flip H"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Flip H", icons::FLIP_HORIZONTAL)),
+                )
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.flip_h()));
             }
             if ui
-                .add_enabled(has, egui::Button::new("↕  Flip V"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Flip V", icons::FLIP_VERTICAL)),
+                )
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.flip_v()));
@@ -499,7 +529,10 @@ impl App {
             ui.separator();
 
             if ui
-                .add_enabled(has, egui::Button::new("⤢  Resize…"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Resize…", icons::ARROWS_OUT_CARDINAL)),
+                )
                 .clicked()
             {
                 let (w, h) = {
@@ -515,7 +548,10 @@ impl App {
             }
             ui.separator();
             if ui
-                .add_enabled(has, egui::Button::new("💾  Save as…"))
+                .add_enabled(
+                    has,
+                    egui::Button::new(format!("{}  Save as…", icons::FLOPPY_DISK)),
+                )
                 .clicked()
             {
                 self.save_dialog = Some(SaveDialogState {
@@ -527,8 +563,8 @@ impl App {
 
             ui.separator();
             let zoom_label = match self.viewer.zoom {
-                Some(z) => format!("🔍 {:.0}%", z * 100.0),
-                None => "🔍 fit".to_string(),
+                Some(z) => format!("{} {:.0}%", icons::MAGNIFYING_GLASS_PLUS, z * 100.0),
+                None => format!("{}  fit", icons::FRAME_CORNERS),
             };
             if ui.button(zoom_label).clicked() {
                 self.viewer.zoom = None;
@@ -668,7 +704,10 @@ impl App {
                 ui.label(busy);
             }
             if let Some(err) = &self.error {
-                ui.colored_label(Color32::from_rgb(255, 130, 130), format!("⚠ {err}"));
+                ui.colored_label(
+                    Color32::from_rgb(255, 130, 130),
+                    format!("{}  {err}", icons::WARNING_CIRCLE),
+                );
             }
             ui.label(&self.status);
         });
@@ -686,7 +725,7 @@ impl App {
         }
         let rect_to_apply = self.crop_rect;
         let mut open = true;
-        egui::Window::new("Crop selection")
+        egui::Window::new(format!("{}  Crop selection", icons::CROP))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -699,10 +738,13 @@ impl App {
                     ));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("✂  Apply").clicked() {
+                    if ui
+                        .button(format!("{}  Apply", icons::CHECK_CIRCLE))
+                        .clicked()
+                    {
                         self.apply_crop(ctx);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
                         self.crop_rect = None;
                         self.crop_drag = None;
                     }

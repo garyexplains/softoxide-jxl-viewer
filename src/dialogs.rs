@@ -13,6 +13,7 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
         return;
     };
     let mut open = true;
+    let mut consumed = false;
 
     egui::Window::new("Save image as…")
         .open(&mut open)
@@ -56,21 +57,26 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                             SaveFormat::Bmp => SaveOptions::Bmp,
                             SaveFormat::Tiff => SaveOptions::Tiff,
                         };
+                        consumed = true;
                         save_with_picker(app, dlg.format, opts);
-                        // dialog consumed on success or cancellation of picker
-                        return;
                     } else {
                         app.error = Some("no image open".into());
                     }
                 }
                 if ui.button("Cancel").clicked() {
-                    app.save_dialog = None;
+                    consumed = true;
                 }
             });
         });
 
-    if !open {
+    // `take()` removed the state for this frame; write it back so the window
+    // survives to the next frame unless the user dismissed it (X), clicked
+    // Cancel, or clicked Save (job started; a cancelled native picker also
+    // counts as finished).
+    if !open || consumed {
         app.save_dialog = None;
+    } else {
+        app.save_dialog = Some(dlg);
     }
 }
 

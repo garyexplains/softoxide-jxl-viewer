@@ -4,6 +4,7 @@ pub mod app;
 pub mod cli;
 pub mod codec;
 pub mod dialogs;
+pub mod icons;
 pub mod raster;
 pub mod view;
 

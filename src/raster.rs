@@ -433,7 +433,9 @@ pub mod bytemuck_helpers {
 
 #[inline]
 fn u16_to_u8(v: u16) -> u8 {
-    ((v as u16 + 128) * 255 / 65535) as u8
+    // NOTE: must be u32 math — (v + 128) * 255 overflows u16 for v >= 258,
+    // which silently wrapped 16-bit images to near-black in release builds.
+    (((v as u32) * 255 + 32768) / 65535) as u8
 }
 
 fn upscale_u8_to_u16(data: &Samples, width: u32, height: u32, has_alpha: bool) -> Samples {
@@ -553,5 +555,21 @@ mod tests {
         assert_eq!(resized.height, 3);
         assert_eq!(resized.channels(), 3);
         assert_eq!(resized.data.len(), 36);
+    }
+
+    #[test]
+    fn u16_to_u8_display_conversion_no_overflow() {
+        // Regression: the 16→8 conversion used to be done in u16 arithmetic
+        // and wrapped for samples >= 258, rendering 16-bit images black.
+        let r = Raster::from_rgba16(2, 1, false, vec![0, 257, 65535, 1000, 32768, 40000]);
+        let rgba = r.to_rgba8_rgba();
+        assert_eq!(rgba[0], 0, "black stays black");
+        assert_eq!(rgba[1], 1, "257 → 1 (257*255/65535 = 0.99)");
+        assert_eq!(rgba[2], 255, "white stays white (used to wrap to ~0)");
+        assert_eq!(rgba[3], 255, "alpha opaque for non-alpha raster");
+        assert_eq!(rgba[4], 4, "1000 → 4");
+        assert_eq!(rgba[5], 128, "mid gray → 128");
+        assert_eq!(rgba[6], 156, "40000 → 156");
+        assert_eq!(rgba[7], 255, "alpha opaque for non-alpha raster");
     }
 }

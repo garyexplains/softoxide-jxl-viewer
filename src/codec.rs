@@ -703,7 +703,8 @@ fn encode_jpeg(raster: &Raster, opts: &JpegSaveOptions) -> Result<Vec<u8>, Strin
         crate::raster::Samples::U16(v) => {
             let mut out = vec![0u8; v.len()];
             for (o, s) in out.iter_mut().zip(v.iter()) {
-                *o = ((s * 255 + 32767) / 65535) as u8;
+                // u32 math: u16 * 255 overflows u16 for s >= 258.
+                *o = (((*s as u32) * 255 + 32767) / 65535) as u8;
             }
             out
         }
@@ -786,7 +787,8 @@ fn encode_bmp(raster: &Raster) -> Result<Vec<u8>, String> {
         crate::raster::Samples::U16(v) => {
             let mut out = vec![0u8; v.len()];
             for (o, s) in out.iter_mut().zip(v.iter()) {
-                *o = ((s * 255 + 32767) / 65535) as u8;
+                // u32 math: u16 * 255 overflows u16 for s >= 258.
+                *o = (((*s as u32) * 255 + 32767) / 65535) as u8;
             }
             out
         }

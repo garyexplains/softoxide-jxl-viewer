@@ -166,6 +166,25 @@ fn save_jpeg_flattens_alpha() {
 }
 
 #[test]
+fn jpeg_save_of_u16_not_black() {
+    // Regression for the same u16-overflow class as the display path: JPEG
+    // (and BMP) saves of 16-bit rasters used the broken downscale.
+    let src = Raster::from_rgba16(8, 8, false, vec![32768u16; 8 * 8 * 3]);
+    let bytes = codec::encode_to_vec(
+        &src,
+        &codec::SaveOptions::Jpeg(codec::JpegSaveOptions { quality: 90 }),
+    )
+    .expect("jpeg encode");
+    let back = codec::decode_from_bytes(&bytes, Some("jpg")).expect("jpeg decode");
+    let px = back.raster.to_rgba8_rgba();
+    let mean: u64 = px.chunks_exact(4).map(|p| u64::from(p[0])).sum::<u64>() / (8 * 8) as u64;
+    assert!(
+        mean > 100,
+        "16-bit mid-gray must not save as black (mean {mean})"
+    );
+}
+
+#[test]
 fn keep_drop_alpha_semantics() {
     let src = make_test_rgba(16, 16);
     let with_alpha = codec::encode_jxl(&src, &JxlSaveOptions::default()).expect("alpha jxl");

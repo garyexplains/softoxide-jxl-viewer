@@ -178,7 +178,7 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
         return;
     };
     let mut open = true;
-    let mut resized_now = false;
+    let mut consumed = false;
 
     egui::Window::new(format!("{}  Resize image", icons::ARROWS_OUT_CARDINAL))
         .open(&mut open)
@@ -236,15 +236,18 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
                     let (w, h) = (d.width as u32, d.height as u32);
                     let filt = d.filter;
                     app.apply_edit(ctx, move |r| r.resized(w, h, filt));
-                    resized_now = true;
+                    consumed = true;
                 }
                 if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
-                    app.resize_dialog = None;
+                    consumed = true;
                 }
             });
         });
 
-    if !open || resized_now {
+    // `take()` removed the state for this frame; write it back so the window
+    // survives to the next frame unless the user dismissed it (X), clicked
+    // Cancel, or clicked Resize (edit applied).
+    if !open || consumed {
         app.resize_dialog = None;
     } else {
         app.resize_dialog = Some(d);

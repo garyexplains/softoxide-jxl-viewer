@@ -10,7 +10,11 @@ views. It runs unchanged on Windows, macOS and Linux.
 ## Features
 
 ### Viewing
-- Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF, WebP.
+- Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF, WebP, PNM.
+- **Animation playback** for animated JXL: all keyframes are decoded, played in a loop at the
+  authored frame rate, with play/pause (`Space`), frame stepping (`,` / `.`) and a frame
+  counter in the toolbar. Editing an animation flattens it to a still (the edited frame);
+  Save-as exports the current frame.
 - **HDR support**: PQ (ST 2084) and HLG (BT.2100) files are detected automatically, decoded
   as float, and perceptually tone-mapped to SDR (extended Reinhard, BT.2408 203-nit reference
   white, Rec.2100 → sRGB gamut conversion). HDR files are tagged in the title bar, status line
@@ -122,7 +126,8 @@ Decisions worth knowing:
 - `jpegxl-rs` (the GPL-3.0 Rust wrapper for libjxl) was deliberately avoided so this project can
   stay MIT/Apache.
 - Exif orientation for JPEG/PNG inputs is not auto-applied yet.
-- Animated JXL/GIF show the first frame.
+- Animated JXL plays back, but Save-as exports only the current frame, and editing flattens
+  the animation to a still.
 - Lossless JXL of grayscale sources is currently rewritten as RGB (channel expansion) — smaller
   gray-true encoding planned.
 - **HDR** (PQ/HLG) files are tone-mapped to SDR for display and for SDR exports; there is no

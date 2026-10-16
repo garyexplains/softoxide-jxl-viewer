@@ -128,6 +128,31 @@ pub struct LoadedImage {
     pub note: Option<String>,
     /// "PQ" or "HLG" when the source was HDR (tone-mapped to SDR for display).
     pub hdr: Option<&'static str>,
+    /// All keyframes + per-frame durations when the file is animated.
+    pub animation: Option<Animation>,
+}
+
+/// Decoded animation: one raster per keyframe and its display duration.
+#[derive(Debug, Clone)]
+pub struct Animation {
+    pub frames: Vec<Raster>,
+    pub durations_ms: Vec<u32>,
+}
+
+impl Animation {
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+}
+
+/// Converts a frame duration in animation ticks to milliseconds.
+/// Ticks per second is `tps_numerator / tps_denominator`.
+pub fn animation_duration_ms(ticks: u32, tps_numerator: u32, tps_denominator: u32) -> u32 {
+    if tps_numerator == 0 || tps_denominator == 0 {
+        return 100;
+    }
+    let ms = ticks as f64 * (tps_denominator as f64 / tps_numerator as f64) * 1000.0;
+    (ms.round() as u64).clamp(10, 60_000) as u32
 }
 
 pub fn decode_file(path: &Path) -> Result<LoadedImage, String> {
@@ -150,25 +175,39 @@ pub fn decode_from_bytes(bytes: &[u8], ext_hint: Option<&str>) -> Result<LoadedI
 
 /// JPEG XL decode preference order:
 /// * HDR (PQ/HLG): jxl-oxide with a perceptual tone map to SDR (all bit depths).
-/// * ≤8-bit SDR: jxl-oxide (color managed to sRGB in pure Rust) → libjxl fallback.
-/// * >8-bit SDR: libjxl first (exact 16-bit integer pipeline; jxl-oxide's float
-///   pipeline drifts ±1 LSB), jxl-oxide fallback for files libjxl can't read.
+/// * Animated: jxl-oxide decodes every keyframe.
+/// * ≤8-bit SDR stills: jxl-oxide (color managed to sRGB in pure Rust) → libjxl fallback.
+/// * >8-bit SDR stills: libjxl first (exact 16-bit integer pipeline), jxl-oxide fallback.
 fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
     let peek = jxl_header_peek(bytes).ok();
-    let hdr_tf = peek.and_then(|(_, hdr)| hdr);
-    let header_bits = peek.map(|(bits, _)| bits).filter(|b| *b > 8);
+    let hdr_tf = peek.as_ref().and_then(|p| p.hdr).map(|h| match h {
+        jxl_oxide::HdrType::Pq => crate::hdr::HdrTf::Pq,
+        jxl_oxide::HdrType::Hlg => crate::hdr::HdrTf::Hlg,
+    });
+    let animated = peek.as_ref().is_some_and(|p| p.animated);
+    let header_bits = peek.as_ref().map(|p| p.bits).filter(|b| *b > 8);
 
     // HDR content: never take the integer paths — they would pass PQ/HLG
     // samples through unconverted or clip them harshly. Decode in the source
     // encoding as f32 and tone-map here.
-    if let Some(tf) = hdr_tf.map(|h| match h {
-        jxl_oxide::HdrType::Pq => crate::hdr::HdrTf::Pq,
-        jxl_oxide::HdrType::Hlg => crate::hdr::HdrTf::Hlg,
-    }) {
+    if let Some(tf) = hdr_tf {
+        if animated {
+            if let Ok(img) = decode_jxl_anim_hdr_oxide(bytes, tf) {
+                return Ok(img);
+            }
+        }
         if let Ok(img) = decode_jxl_hdr_oxide(bytes, tf) {
             return Ok(img);
         }
         // Fall through to the regular paths if the HDR decode failed.
+    }
+
+    // Animated files: decode all keyframes with jxl-oxide (coalesced).
+    if animated {
+        if let Ok(img) = decode_jxl_anim_oxide(bytes) {
+            return Ok(img);
+        }
+        // Fall through: static first-frame decode below.
     }
 
     if header_bits.is_some() {
@@ -179,6 +218,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
                 via_fallback: false,
                 note: Some("decoded with libjxl (16-bit exact path)".into()),
                 hdr: None,
+                animation: None,
             });
         }
     }
@@ -201,6 +241,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
                 via_fallback: true,
                 note: Some(format!("decoded with libjxl fallback ({primary_err})")),
                 hdr: None,
+                animation: None,
             })
             .map_err(|fallback_err| {
                 format!("JPEG XL decode failed — jxl-oxide: {primary_err}; libjxl: {fallback_err}")
@@ -208,13 +249,22 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
     }
 }
 
-/// Cheap header peek for the file's sample bit depth and HDR transfer function.
-fn jxl_header_peek(bytes: &[u8]) -> Result<(u32, Option<jxl_oxide::HdrType>), String> {
+struct JxlPeek {
+    bits: u32,
+    hdr: Option<jxl_oxide::HdrType>,
+    animated: bool,
+}
+
+/// Cheap header peek: sample bit depth, HDR transfer function, animated flag.
+fn jxl_header_peek(bytes: &[u8]) -> Result<JxlPeek, String> {
     let image = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(bytes))
         .map_err(|e| format!("jxl header: {e}"))?;
-    let bits = image.image_header().metadata.bit_depth.bits_per_sample();
-    Ok((bits, image.hdr_type()))
+    Ok(JxlPeek {
+        bits: image.image_header().metadata.bit_depth.bits_per_sample(),
+        hdr: image.hdr_type(),
+        animated: image.image_header().metadata.animation.is_some(),
+    })
 }
 
 /// HDR (PQ/HLG) decode: renders in the source encoding as f32 and applies a
@@ -247,21 +297,40 @@ fn decode_jxl_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedIma
         .intensity_target
         .max(1.0);
 
-    let render = image
-        .render_frame(0)
-        .map_err(|e| format!("render frame: {e}"))?;
-    let mut stream = render.stream();
-    let width = stream.width();
-    let height = stream.height();
-    let channels = stream.channels() as usize;
-    let npix = width as usize * height as usize;
-
     let has_alpha = image
         .image_header()
         .metadata
         .ec_info
         .iter()
         .any(|ec| matches!(ec.ty, jxl_oxide::ExtraChannelType::Alpha { .. }));
+
+    let render = image
+        .render_frame(0)
+        .map_err(|e| format!("render frame: {e}"))?;
+    let raster = hdr_frame_raster(&render, tf, has_alpha, peak_from_meta);
+
+    Ok(LoadedImage {
+        raster,
+        format: Format::Jxl,
+        via_fallback: false,
+        note: None,
+        hdr: Some(tf.as_str()),
+        animation: None,
+    })
+}
+
+/// Renders one coalesced HDR frame and tone-maps it to sRGB (u8).
+fn hdr_frame_raster(
+    render: &jxl_oxide::Render,
+    tf: crate::hdr::HdrTf,
+    has_alpha: bool,
+    peak_from_meta: f32,
+) -> Raster {
+    let mut stream = render.stream();
+    let width = stream.width();
+    let height = stream.height();
+    let channels = stream.channels() as usize;
+    let npix = width as usize * height as usize;
 
     // Read the raw encoded samples as f32.
     let expect_len = npix * channels;
@@ -314,13 +383,7 @@ fn decode_jxl_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedIma
         drop_alpha_to_rgb(&out)
     };
 
-    Ok(LoadedImage {
-        raster: Raster::from_rgba8(width, height, has_alpha, data),
-        format: Format::Jxl,
-        via_fallback: false,
-        note: None,
-        hdr: Some(tf.as_str()),
-    })
+    Raster::from_rgba8(width, height, has_alpha, data)
 }
 
 fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
@@ -338,17 +401,6 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
 
     let file_bits = image.image_header().metadata.bit_depth.bits_per_sample();
 
-    let render = image
-        .render_frame(0)
-        .map_err(|e| format!("render frame: {e}"))?;
-
-    let mut stream = render.stream();
-    let width = stream.width();
-    let height = stream.height();
-    let channels = stream.channels() as usize;
-    let npix = width as usize * height as usize;
-
-    // Is there a real alpha extra channel?
     let has_alpha = image
         .image_header()
         .metadata
@@ -356,29 +408,162 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         .iter()
         .any(|ec| matches!(ec.ty, jxl_oxide::ExtraChannelType::Alpha { .. }));
 
-    // Decode samples at the file's native depth when > 8 bits.
-    if file_bits > 8 {
-        let raw = read_stream_u16(&mut stream, npix * channels);
-        let out = normalize_stream(&raw, channels, has_alpha, 65535u16);
-        let data = if has_alpha { out } else { strip_alpha(out) };
-        return Ok(LoadedImage {
-            raster: Raster::from_rgba16(width, height, has_alpha, data),
-            format: Format::Jxl,
-            via_fallback: false,
-            note: None,
-            hdr: None,
-        });
-    }
+    let render = image
+        .render_frame(0)
+        .map_err(|e| format!("render frame: {e}"))?;
+    let raster = sdr_frame_raster(&render, has_alpha, file_bits > 8);
 
-    let raw = read_stream_u8(&mut stream, npix * channels);
-    let out = normalize_stream(&raw, channels, has_alpha, 255u8);
-    let data = if has_alpha { out } else { strip_alpha(out) };
     Ok(LoadedImage {
-        raster: Raster::from_rgba8(width, height, has_alpha, data),
+        raster,
         format: Format::Jxl,
         via_fallback: false,
         note: None,
         hdr: None,
+        animation: None,
+    })
+}
+
+/// Renders one coalesced SDR frame into a Raster (u16 when the file is deep).
+fn sdr_frame_raster(render: &jxl_oxide::Render, has_alpha: bool, deep: bool) -> Raster {
+    let mut stream = render.stream();
+    let width = stream.width();
+    let height = stream.height();
+    let channels = stream.channels() as usize;
+    let npix = width as usize * height as usize;
+
+    if deep {
+        let raw = read_stream_u16(&mut stream, npix * channels);
+        let out = normalize_stream(&raw, channels, has_alpha, 65535u16);
+        let data = if has_alpha { out } else { strip_alpha(out) };
+        Raster::from_rgba16(width, height, has_alpha, data)
+    } else {
+        let raw = read_stream_u8(&mut stream, npix * channels);
+        let out = normalize_stream(&raw, channels, has_alpha, 255u8);
+        let data = if has_alpha { out } else { strip_alpha(out) };
+        Raster::from_rgba8(width, height, has_alpha, data)
+    }
+}
+
+/// Upper bound on decoded animation keyframes (memory guard).
+const MAX_ANIM_FRAMES: usize = 256;
+
+/// Decodes every animation keyframe (coalesced, sRGB) with jxl-oxide.
+fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
+    use jxl_oxide::{EnumColourEncoding, JxlImage, RenderingIntent};
+
+    let mut image = JxlImage::builder()
+        .read(Cursor::new(bytes))
+        .map_err(|e| format!("jxl header: {e}"))?;
+    image.set_cms(jxl_oxide::Moxcms);
+    let _ = image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Perceptual));
+
+    let has_alpha = image
+        .image_header()
+        .metadata
+        .ec_info
+        .iter()
+        .any(|ec| matches!(ec.ty, jxl_oxide::ExtraChannelType::Alpha { .. }));
+    let deep = image.image_header().metadata.bit_depth.bits_per_sample() > 8;
+    let (tps_num, tps_den) = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|a| (a.tps_numerator, a.tps_denominator))
+        .unwrap_or((1000, 1));
+
+    let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
+    let mut frames = Vec::with_capacity(n);
+    let mut durations_ms = Vec::with_capacity(n);
+    for idx in 0..n {
+        let render = image
+            .render_frame(idx)
+            .map_err(|e| format!("render frame {idx}: {e}"))?;
+        frames.push(sdr_frame_raster(&render, has_alpha, deep));
+        durations_ms.push(animation_duration_ms(render.duration(), tps_num, tps_den));
+    }
+    if frames.is_empty() {
+        return Err("animation contains no frames".into());
+    }
+
+    let raster = frames[0].clone();
+    Ok(LoadedImage {
+        raster,
+        format: Format::Jxl,
+        via_fallback: false,
+        note: None,
+        hdr: None,
+        animation: Some(Animation {
+            frames,
+            durations_ms,
+        }),
+    })
+}
+
+/// Decodes every animation keyframe of an HDR file, tone-mapped to sRGB.
+fn decode_jxl_anim_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedImage, String> {
+    use jxl_oxide::JxlImage;
+
+    let mut image = JxlImage::builder()
+        .read(Cursor::new(bytes))
+        .map_err(|e| format!("jxl header: {e}"))?;
+    image.set_cms(jxl_oxide::Moxcms);
+
+    let requested = match tf {
+        crate::hdr::HdrTf::Pq => {
+            jxl_oxide::EnumColourEncoding::bt2100_pq(jxl_oxide::RenderingIntent::Relative)
+        }
+        crate::hdr::HdrTf::Hlg => {
+            jxl_oxide::EnumColourEncoding::bt2100_hlg(jxl_oxide::RenderingIntent::Relative)
+        }
+    };
+    image.request_color_encoding(requested);
+
+    let peak_from_meta = image
+        .image_header()
+        .metadata
+        .tone_mapping
+        .intensity_target
+        .max(1.0);
+    let has_alpha = image
+        .image_header()
+        .metadata
+        .ec_info
+        .iter()
+        .any(|ec| matches!(ec.ty, jxl_oxide::ExtraChannelType::Alpha { .. }));
+    let (tps_num, tps_den) = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|a| (a.tps_numerator, a.tps_denominator))
+        .unwrap_or((1000, 1));
+
+    let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
+    let mut frames = Vec::with_capacity(n);
+    let mut durations_ms = Vec::with_capacity(n);
+    for idx in 0..n {
+        let render = image
+            .render_frame(idx)
+            .map_err(|e| format!("render frame {idx}: {e}"))?;
+        frames.push(hdr_frame_raster(&render, tf, has_alpha, peak_from_meta));
+        durations_ms.push(animation_duration_ms(render.duration(), tps_num, tps_den));
+    }
+    if frames.is_empty() {
+        return Err("animation contains no frames".into());
+    }
+
+    let raster = frames[0].clone();
+    Ok(LoadedImage {
+        raster,
+        format: Format::Jxl,
+        via_fallback: false,
+        note: None,
+        hdr: Some(tf.as_str()),
+        animation: Some(Animation {
+            frames,
+            durations_ms,
+        }),
     })
 }
 
@@ -515,6 +700,7 @@ fn decode_with_image_crate(
             via_fallback: false,
             note: None,
             hdr: None,
+            animation: None,
         });
     }
     if let image::DynamicImage::ImageRgb16(rgb16) = &dynamic {
@@ -524,6 +710,7 @@ fn decode_with_image_crate(
             via_fallback: false,
             note: None,
             hdr: None,
+            animation: None,
         });
     }
     if let image::DynamicImage::ImageLumaA16(la) = &dynamic {
@@ -541,6 +728,7 @@ fn decode_with_image_crate(
             via_fallback: false,
             note: None,
             hdr: None,
+            animation: None,
         });
     }
     if let image::DynamicImage::ImageLuma16(l) = &dynamic {
@@ -557,6 +745,7 @@ fn decode_with_image_crate(
             via_fallback: false,
             note: None,
             hdr: None,
+            animation: None,
         });
     }
 
@@ -579,6 +768,7 @@ fn decode_with_image_crate(
         via_fallback: false,
         note: None,
         hdr: None,
+        animation: None,
     })
 }
 
@@ -817,8 +1007,17 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
         Some(h) => format!("\nHDR: {} (tone-mapped to SDR for display)", h),
         None => String::new(),
     };
+    let anim_line = match &img.animation {
+        Some(a) => format!(
+            "\nanimation: {} frames, per-frame durations {}…{} ms",
+            a.frame_count(),
+            a.durations_ms.iter().min().copied().unwrap_or(0),
+            a.durations_ms.iter().max().copied().unwrap_or(0)
+        ),
+        None => "\nanimation: no (still image)".to_string(),
+    };
     Ok(format!(
-        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}\nanimated: n/a (first frame shown){}{}{}",
+        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}{}{}{}{}",
         format.as_str(),
         format,
         r.width,
@@ -836,6 +1035,7 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
             .map(|n| format!("\nnote: {n}"))
             .unwrap_or_default(),
         hdr_line,
+        anim_line,
         format!("\nfile size: {} bytes", bytes.len()),
     ))
 }

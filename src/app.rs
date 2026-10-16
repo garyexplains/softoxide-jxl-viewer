@@ -27,6 +27,24 @@ pub(crate) struct Document {
     pub(crate) dirty: bool,
     /// "PQ"/"HLG" when the source was HDR (display is tone-mapped to SDR).
     pub(crate) hdr: Option<&'static str>,
+    /// Animation playback state (rasters live in `frames`).
+    pub(crate) anim: Option<AnimPlayer>,
+}
+
+/// Animation data + playback position.
+#[derive(Clone)]
+pub(crate) struct AnimPlayer {
+    pub frames: Vec<Raster>,
+    pub durations_ms: Vec<u32>,
+    pub frame_idx: usize,
+    pub playing: bool,
+    pub frame_started: std::time::Instant,
+}
+
+impl AnimPlayer {
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -154,8 +172,16 @@ impl App {
         match op(&old) {
             Ok(new) => {
                 if let Some(doc) = &mut self.doc {
+                    // Edits operate on the displayed frame; keeping the rest of
+                    // an animation consistent with them is not supported, so
+                    // the animation flattens to a still.
+                    let flattened = doc.anim.take().is_some();
                     doc.raster = new;
                     doc.dirty = true;
+                    if flattened {
+                        self.status =
+                            "Animation flattened to a still (edit applied to current frame)".into();
+                    }
                 }
                 self.needs_rebuild = true;
                 self.crop_rect = None;
@@ -235,6 +261,13 @@ impl App {
                     raster: img.raster,
                     dirty: false,
                     hdr: img.hdr,
+                    anim: img.animation.map(|a| AnimPlayer {
+                        frames: a.frames,
+                        durations_ms: a.durations_ms,
+                        frame_idx: 0,
+                        playing: true,
+                        frame_started: std::time::Instant::now(),
+                    }),
                 });
                 if let Some(note) = &img.note {
                     // Informational (e.g. "decoded with libjxl (16-bit exact
@@ -250,6 +283,10 @@ impl App {
                 self.last_dir = path.parent().map(|p| p.to_path_buf());
                 let hdr_note = match img.hdr {
                     Some(h) => format!(", {h} HDR tone-mapped to SDR"),
+                    None => String::new(),
+                };
+                let anim_note = match &self.doc.as_ref().unwrap().anim {
+                    Some(a) => format!(", {}-frame animation", a.frame_count()),
                     None => String::new(),
                 };
                 self.status = format!(
@@ -268,7 +305,7 @@ impl App {
                     } else {
                         ""
                     },
-                    hdr_note,
+                    [hdr_note, anim_note].concat(),
                 );
             }
             Err(e) => self.error = Some(e),
@@ -406,6 +443,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+        self.tick_animation(&ctx);
         self.refresh_texture(&ctx);
 
         egui::Panel::top("toolbar")
@@ -424,6 +462,53 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Advances animation playback and schedules the next repaint.
+    fn tick_animation(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        let Some(anim) = &mut doc.anim else { return };
+        if !anim.playing {
+            return;
+        }
+        let dur = anim.durations_ms[anim.frame_idx].max(1) as u128;
+        let elapsed = anim.frame_started.elapsed().as_millis();
+        if elapsed >= dur {
+            let n = anim.frames.len();
+            let advance = (elapsed / dur) as usize;
+            anim.frame_idx = (anim.frame_idx + advance) % n;
+            doc.raster = anim.frames[anim.frame_idx].clone();
+            anim.frame_started = std::time::Instant::now();
+            self.needs_rebuild = true;
+        }
+        let remaining = dur.saturating_sub(anim.frame_started.elapsed().as_millis()) as u64;
+        ctx.request_repaint_after(std::time::Duration::from_millis(remaining.max(1)));
+    }
+
+    /// Steps the animation by ±1 frame (pausing playback).
+    fn anim_step(&mut self, delta: isize, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        let Some(anim) = &mut doc.anim else { return };
+        anim.playing = false;
+        let n = anim.frames.len() as isize;
+        anim.frame_idx = (anim.frame_idx as isize + delta).rem_euclid(n) as usize;
+        doc.raster = anim.frames[anim.frame_idx].clone();
+        anim.frame_started = std::time::Instant::now();
+        self.needs_rebuild = true;
+        ctx.request_repaint();
+    }
+
+    /// Toggles animation play/pause.
+    fn anim_toggle_play(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        let Some(anim) = &mut doc.anim else { return };
+        anim.playing = !anim.playing;
+        anim.frame_started = std::time::Instant::now();
+        if anim.playing {
+            let dur = anim.durations_ms[anim.frame_idx].max(1) as u64;
+            ctx.request_repaint_after(std::time::Duration::from_millis(dur));
+        }
+        ctx.request_repaint();
+    }
+
     /// Keyboard shortcuts.
     ///
     /// * Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) — undo / redo
@@ -432,6 +517,7 @@ impl App {
     /// * R / L — rotate right / left, H / V — flip horizontal / vertical
     /// * + / − — zoom, 0 — fit, 1 — 1:1
     /// * Enter — apply crop selection, Escape — close dialog / clear crop
+    /// * Space — play/pause animation, `,` / `.` — step frame
     /// * ←/→ by name, ↑/↓ by mtime, Home — original file (folder navigation)
     ///
     /// Never fires while a text field has keyboard focus; when a dialog is
@@ -525,6 +611,22 @@ impl App {
             self.crop_drag = None;
             ctx.request_repaint();
             return;
+        }
+
+        // ---- animation playback ---------------------------------------------
+        if self.doc.as_ref().is_some_and(|d| d.anim.is_some()) && plain {
+            if pressed(Key::Space) {
+                self.anim_toggle_play(ctx);
+                return;
+            }
+            if pressed(Key::Period) {
+                self.anim_step(1, ctx);
+                return;
+            }
+            if pressed(Key::Comma) {
+                self.anim_step(-1, ctx);
+                return;
+            }
         }
 
         // ---- edits (need an image) ------------------------------------------
@@ -746,6 +848,46 @@ impl App {
                 self.crop_drag = None;
             }
 
+            // Animation playback controls
+            let anim_info = self
+                .doc
+                .as_ref()
+                .and_then(|d| d.anim.as_ref())
+                .map(|a| (a.playing, a.frame_idx, a.frame_count()));
+            if let Some((playing, frame_idx, frame_count)) = anim_info {
+                ui.separator();
+                if ui
+                    .button(if playing {
+                        format!("{}", icons::PAUSE)
+                    } else {
+                        format!("{}", icons::PLAY)
+                    })
+                    .on_hover_text(if playing {
+                        "Pause (Space)"
+                    } else {
+                        "Play (Space)"
+                    })
+                    .clicked()
+                {
+                    self.anim_toggle_play(ctx);
+                }
+                if ui
+                    .button(icons::SKIP_BACK)
+                    .on_hover_text("Previous frame (,)")
+                    .clicked()
+                {
+                    self.anim_step(-1, ctx);
+                }
+                ui.label(format!("{}/{}", frame_idx + 1, frame_count));
+                if ui
+                    .button(icons::SKIP_FORWARD)
+                    .on_hover_text("Next frame (.)")
+                    .clicked()
+                {
+                    self.anim_step(1, ctx);
+                }
+            }
+
             if ui
                 .add_enabled(
                     has,
@@ -960,11 +1102,21 @@ impl App {
         ui.horizontal(|ui| {
             if let Some(doc) = &self.doc {
                 ui.label(format!(
-                    "{} × {} px, {}-bit, alpha {}",
+                    "{} × {} px, {}-bit, alpha {}{}",
                     doc.raster.width,
                     doc.raster.height,
                     doc.raster.bits,
-                    if doc.raster.has_alpha { "yes" } else { "no" }
+                    if doc.raster.has_alpha { "yes" } else { "no" },
+                    if let Some(anim) = &doc.anim {
+                        format!(
+                            ", frame {}/{}{}",
+                            anim.frame_idx + 1,
+                            anim.frame_count(),
+                            if anim.playing { "" } else { " (paused)" }
+                        )
+                    } else {
+                        String::new()
+                    }
                 ));
                 if doc.dirty {
                     ui.strong("  (modified)");

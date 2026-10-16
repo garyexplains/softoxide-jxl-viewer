@@ -28,6 +28,11 @@ pub const X_CIRCLE: &str = "\u{E4F8}";
 pub const ARROWS_HORIZONTAL: &str = "\u{EB06}";
 pub const ARROWS_VERTICAL: &str = "\u{EB04}";
 pub const SWAP: &str = "\u{E83C}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const PAUSE: &str = "\u{E39E}";
+pub const SKIP_BACK: &str = "\u{E5A4}";
+pub const SKIP_FORWARD: &str = "\u{E5A6}";
+pub const FILM_STRIP: &str = "\u{E792}";
 
 /// Registers the vendored Phosphor font as a proportional-text fallback.
 pub fn add_to_fonts(fonts: &mut eframe::egui::FontDefinitions) {

@@ -1936,6 +1936,7 @@ dependencies = [
  "jpeg-encoder",
  "jxl-native",
  "jxl-oxide",
+ "png",
  "rfd",
 ]
 

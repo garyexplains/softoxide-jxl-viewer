@@ -209,6 +209,38 @@ pub mod ffi {
         ) -> JxlDecoderStatus;
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct JxlBlendInfo {
+        pub blendmode: c_int,
+        pub source: u32,
+        pub alpha: u32,
+        pub clamp: Jxl_BOOL,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct JxlLayerInfo {
+        pub have_crop: Jxl_BOOL,
+        pub crop_x0: i32,
+        pub crop_y0: i32,
+        pub xsize: u32,
+        pub ysize: u32,
+        pub blend_info: JxlBlendInfo,
+        pub save_as_reference: u32,
+    }
+
+    /// Mirrors `JxlFrameHeader` (codestream_header.h).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct JxlFrameHeader {
+        pub duration: u32,
+        pub timecode: u32,
+        pub name_length: u32,
+        pub is_last: Jxl_BOOL,
+        pub layer_info: JxlLayerInfo,
+    }
+
     #[link(name = "jxl")]
     unsafe extern "C" {
         pub fn JxlEncoderCreate(mem: JxlMemoryManager) -> *mut c_void;
@@ -247,6 +279,11 @@ pub mod ffi {
             size: usize,
         ) -> JxlEncoderStatus;
         pub fn JxlEncoderCloseInput(enc: *mut c_void);
+        pub fn JxlEncoderInitFrameHeader(frame_header: *mut JxlFrameHeader);
+        pub fn JxlEncoderSetFrameHeader(
+            settings: *mut c_void,
+            frame_header: *const JxlFrameHeader,
+        ) -> JxlEncoderStatus;
         pub fn JxlEncoderProcessOutput(
             enc: *mut c_void,
             next_out: *mut *mut u8,
@@ -572,35 +609,239 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
         )?;
         unsafe { ffi::JxlEncoderCloseInput(enc) };
 
-        // Output buffer dance: keep `out.len()` as the used prefix and the tail
-        // as available space for ProcessOutput to fill.
-        let mut out: Vec<u8> = vec![0u8; (1 << 20).max(64)];
-        let mut next_out: *mut u8 = out.as_mut_ptr();
-        let mut avail: usize = out.len();
-        let final_result: Result<Vec<u8>, JxlError> = loop {
-            let status = unsafe { ffi::JxlEncoderProcessOutput(enc, &mut next_out, &mut avail) };
-            match status {
-                ffi::JXL_ENC_SUCCESS => {
-                    let used = out.len() - avail;
-                    out.truncate(used);
-                    break Ok(out);
-                }
-                ffi::JXL_ENC_NEED_MORE_OUTPUT => {
-                    let used = out.len() - avail;
-                    out.resize(out.len() * 2, 0);
-                    next_out = unsafe { out.as_mut_ptr().add(used) };
-                    avail = out.len() - used;
-                }
-                _ => {
-                    let code = unsafe { ffi::JxlEncoderGetError(enc) };
-                    if code == 25 {
-                        break Err(err(format!("process output not supported ({code})")));
-                    }
-                    break Err(err(format!("JxlEncoderProcessOutput failed (code {code})")));
-                }
+        unsafe { drain_output(enc) }
+    };
+
+    unsafe { ffi::JxlEncoderDestroy(enc) };
+    result
+}
+
+/// Drives `JxlEncoderProcessOutput` until the codestream is complete.
+unsafe fn drain_output(enc: *mut std::ffi::c_void) -> Result<Vec<u8>, JxlError> {
+    // Output buffer dance: keep `out.len()` as the used prefix and the tail
+    // as available space for ProcessOutput to fill.
+    let mut out: Vec<u8> = vec![0u8; (1 << 20).max(64)];
+    let mut next_out: *mut u8 = out.as_mut_ptr();
+    let mut avail: usize = out.len();
+    let final_result: Result<Vec<u8>, JxlError> = loop {
+        let status = unsafe { ffi::JxlEncoderProcessOutput(enc, &mut next_out, &mut avail) };
+        match status {
+            ffi::JXL_ENC_SUCCESS => {
+                let used = out.len() - avail;
+                out.truncate(used);
+                break Ok(out);
             }
+            ffi::JXL_ENC_NEED_MORE_OUTPUT => {
+                let used = out.len() - avail;
+                out.resize(out.len() * 2, 0);
+                next_out = unsafe { out.as_mut_ptr().add(used) };
+                avail = out.len() - used;
+            }
+            _ => {
+                let code = unsafe { ffi::JxlEncoderGetError(enc) };
+                if code == 25 {
+                    break Err(err(format!("process output not supported ({code})")));
+                }
+                break Err(err(format!("JxlEncoderProcessOutput failed (code {code})")));
+            }
+        }
+    };
+    final_result
+}
+
+/// Animated encode: one image per frame with per-frame durations.
+///
+/// Ticks-per-second is fixed at 1000/1 so `durations_ms` maps 1:1 to ticks.
+pub struct AnimEncodeInput {
+    pub width: u32,
+    pub height: u32,
+    pub has_alpha: bool,
+    /// One buffer per frame; every buffer uses the same [`Pixels`] variant and
+    /// matches `width × height × (4 or 3)` samples.
+    pub frames: Vec<Pixels>,
+    /// Per-frame display duration in milliseconds.
+    pub durations_ms: Vec<u32>,
+    /// Animation loop count, 0 = infinite.
+    pub loops: u32,
+    pub options: EncodeOptions,
+}
+
+pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> {
+    let AnimEncodeInput {
+        width,
+        height,
+        has_alpha,
+        frames,
+        durations_ms,
+        loops,
+        options,
+    } = input;
+    if frames.is_empty() || frames.len() != durations_ms.len() {
+        return Err(err("frame/duration count mismatch"));
+    }
+    let expected_len: usize = width as usize * height as usize * if has_alpha { 4 } else { 3 };
+    let is_u16 = matches!(frames[0], Pixels::U16(_));
+    for (i, f) in frames.iter().enumerate() {
+        let ok = match f {
+            Pixels::U8(d) => !is_u16 && d.len() == expected_len,
+            Pixels::U16(d) => is_u16 && d.len() == expected_len,
         };
-        final_result
+        if !ok {
+            return Err(err(format!("frame {i} buffer size mismatch")));
+        }
+    }
+
+    let enc = unsafe { ffi::JxlEncoderCreate(std::ptr::null()) };
+    if enc.is_null() {
+        return Err(err("JxlEncoderCreate failed"));
+    }
+
+    let result = {
+        let runner = ThreadRunner::with_default_threads();
+        enc_status(
+            unsafe { ffi::JxlEncoderSetParallelRunner(enc, Some(run_callback), runner.0) },
+            enc,
+            "JxlEncoderSetParallelRunner",
+        )?;
+
+        let mut info: ffi::JxlBasicInfo = unsafe { std::mem::zeroed() };
+        unsafe { ffi::JxlEncoderInitBasicInfo(&mut info) };
+        info.xsize = width;
+        info.ysize = height;
+        info.orientation = 1;
+        info.num_color_channels = 3;
+        info.num_extra_channels = if has_alpha { 1 } else { 0 };
+        info.bits_per_sample = if is_u16 { 16 } else { 8 };
+        info.alpha_bits = if has_alpha {
+            if is_u16 { 16 } else { 8 }
+        } else {
+            0
+        };
+        info.alpha_exponent_bits = 0;
+        info.uses_original_profile = if options.lossless { 1 } else { 0 };
+        info.have_animation = 1;
+        // 1000 ticks per second → 1 tick = 1 ms, so durations_ms maps 1:1.
+        info.animation = ffi::JxlAnimationHeader {
+            tps_numerator: 1000,
+            tps_denominator: 1,
+            num_loops: loops,
+            have_timecodes: 0,
+        };
+        enc_status(
+            unsafe { ffi::JxlEncoderSetBasicInfo(enc, &info) },
+            enc,
+            "JxlEncoderSetBasicInfo",
+        )?;
+
+        let mut color: ffi::JxlColorEncoding = unsafe { std::mem::zeroed() };
+        color.color_space = ffi::JXL_COLOR_SPACE_RGB;
+        color.white_point = ffi::JXL_WHITE_POINT_D65;
+        color.primaries = ffi::JXL_PRIMARIES_SRGB;
+        color.transfer_function = ffi::JXL_TRANSFER_FUNCTION_SRGB;
+        color.rendering_intent = ffi::JXL_RENDERING_INTENT_RELATIVE;
+        enc_status(
+            unsafe { ffi::JxlEncoderSetColorEncoding(enc, &color) },
+            enc,
+            "JxlEncoderSetColorEncoding",
+        )?;
+
+        let settings = unsafe { ffi::JxlEncoderFrameSettingsCreate(enc, std::ptr::null()) };
+        if settings.is_null() {
+            return Err(err("JxlEncoderFrameSettingsCreate failed"));
+        }
+        enc_status(
+            unsafe {
+                ffi::JxlEncoderFrameSettingsSetOption(
+                    settings,
+                    ffi::JXL_ENC_FRAME_SETTING_EFFORT,
+                    options.effort,
+                )
+            },
+            enc,
+            "JxlEncoderFrameSettingsSetOption(EFFORT)",
+        )?;
+        if options.lossless {
+            enc_status(
+                unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
+                enc,
+                "JxlEncoderSetFrameLossless",
+            )?;
+        } else {
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderSetFrameDistance(settings, options.distance.clamp(0.0, 25.0))
+                },
+                enc,
+                "JxlEncoderSetFrameDistance",
+            )?;
+        }
+        if let Some(m) = options.modular {
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_MODULAR,
+                        if m { 1 } else { 0 },
+                    )
+                },
+                enc,
+                "JxlEncoderFrameSettingsSetOption(MODULAR)",
+            )?;
+        }
+        if let Some(gs) = options.group_size {
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_MODULAR_GROUP_SIZE,
+                        gs.setting_value(),
+                    )
+                },
+                enc,
+                "JxlEncoderFrameSettingsSetOption(MODULAR_GROUP_SIZE)",
+            )?;
+        }
+
+        let pixel_format = ffi::JxlPixelFormat {
+            num_channels: if has_alpha { 4 } else { 3 },
+            data_type: if is_u16 {
+                ffi::JXL_TYPE_UINT16
+            } else {
+                ffi::JXL_TYPE_UINT8
+            },
+            endianness: ffi::JXL_NATIVE_ENDIAN,
+            align: 0,
+        };
+
+        for (i, frame) in frames.iter().enumerate() {
+            let mut fh: ffi::JxlFrameHeader = unsafe { std::mem::zeroed() };
+            unsafe { ffi::JxlEncoderInitFrameHeader(&mut fh) };
+            fh.duration = durations_ms[i].clamp(1, u32::MAX);
+            enc_status(
+                unsafe { ffi::JxlEncoderSetFrameHeader(settings, &fh) },
+                enc,
+                "JxlEncoderSetFrameHeader",
+            )?;
+            let buf_ptr: *const u8 = match frame {
+                Pixels::U8(d) => d.as_ptr(),
+                Pixels::U16(d) => d.as_ptr() as *const u8,
+            };
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderAddImageFrame(
+                        settings as *const _,
+                        &pixel_format,
+                        buf_ptr,
+                        expected_len * if is_u16 { 2 } else { 1 },
+                    )
+                },
+                enc,
+                "JxlEncoderAddImageFrame",
+            )?;
+        }
+        unsafe { ffi::JxlEncoderCloseInput(enc) };
+
+        unsafe { drain_output(enc) }
     };
 
     unsafe { ffi::JxlEncoderDestroy(enc) };

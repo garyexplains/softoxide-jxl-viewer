@@ -683,15 +683,11 @@ impl App {
             return;
         }
         if plain && pressed(Key::Num0) {
-            self.viewer.zoom = None;
-            self.viewer.offset = Vec2::ZERO;
-            ctx.request_repaint();
+            self.set_view_zoom(None, ctx);
             return;
         }
         if plain && pressed(Key::Num1) {
-            self.viewer.zoom = Some(1.0);
-            self.viewer.offset = Vec2::ZERO;
-            ctx.request_repaint();
+            self.set_view_zoom(Some(1.0), ctx);
             return;
         }
 
@@ -752,12 +748,40 @@ impl App {
         let img_size = Vec2::new(doc.raster.width as f32, doc.raster.height as f32);
         let zoom = self.effective_zoom(canvas.size(), img_size);
         let new_zoom = (zoom * factor).clamp(0.02, 60.0);
-        let anchor_screen = canvas.center();
-        let img_rect = Rect::from_min_size(canvas.min + self.viewer.offset, img_size * zoom);
-        let anchor = crate::view::screen_to_px(anchor_screen, img_rect, img_size);
+        let base_offset = if self.viewer.zoom.is_none() {
+            (canvas.size() - img_size * zoom) / 2.0
+        } else {
+            self.viewer.offset
+        };
+        let img_rect = Rect::from_min_size(canvas.min + base_offset, img_size * zoom);
+        let anchor = crate::view::screen_to_px(canvas.center(), img_rect, img_size);
         self.viewer.zoom = Some(new_zoom);
-        self.viewer.offset = (anchor_screen - canvas.min) - anchor * new_zoom;
+        self.viewer.offset = (canvas.center() - canvas.min) - anchor * new_zoom;
         self.needs_rebuild = true;
+        ctx.request_repaint();
+    }
+
+    /// Sets an explicit zoom (or `None` for fit), centering the image in the
+    /// last-known canvas.
+    fn set_view_zoom(&mut self, zoom: Option<f32>, ctx: &egui::Context) {
+        match zoom {
+            Some(z) => {
+                let Some(doc) = &self.doc else {
+                    return;
+                };
+                let img = Vec2::new(doc.raster.width as f32, doc.raster.height as f32);
+                self.viewer.zoom = Some(z);
+                self.viewer.offset = self
+                    .canvas_rect
+                    .map(|c| (c.size() - img * z) / 2.0)
+                    .unwrap_or(Vec2::ZERO);
+            }
+            None => {
+                // Fit mode auto-centers every frame.
+                self.viewer.zoom = None;
+                self.viewer.offset = Vec2::ZERO;
+            }
+        }
         ctx.request_repaint();
     }
 
@@ -997,16 +1021,14 @@ impl App {
                 .on_hover_text("Fit to window (0); mouse wheel zooms at the pointer")
                 .clicked()
             {
-                self.viewer.zoom = None;
-                self.viewer.offset = Vec2::ZERO;
+                self.set_view_zoom(None, ctx);
             }
             if ui
                 .add_enabled(has, egui::Button::new("1:1"))
                 .on_hover_text("Actual size, 100% (1)")
                 .clicked()
             {
-                self.viewer.zoom = Some(1.0);
-                self.viewer.offset = Vec2::ZERO;
+                self.set_view_zoom(Some(1.0), ctx);
             }
         });
     }
@@ -1051,7 +1073,14 @@ impl App {
         let img_size = Vec2::new(doc.raster.width as f32, doc.raster.height as f32);
         let zoom = self.effective_zoom(avail_rect.size(), img_size);
         let shown = img_size * zoom;
-        let img_rect = Rect::from_min_size(avail_rect.min + self.viewer.offset, shown);
+        // Fit mode auto-centers the image in the canvas; explicit zoom/pan
+        // (wheel, drag, 1:1) takes over from the centered position.
+        let base_offset = if self.viewer.zoom.is_none() {
+            (avail_rect.size() - shown) / 2.0
+        } else {
+            self.viewer.offset
+        };
+        let img_rect = Rect::from_min_size(avail_rect.min + base_offset, shown);
 
         let pointer_hover = ctx.input(|i| i.pointer.hover_pos());
         let pointer_in_image = pointer_hover.map(|p| img_rect.contains(p)).unwrap_or(false);
@@ -1086,10 +1115,15 @@ impl App {
             ctx.request_repaint();
         }
 
-        // pan with drag (pan tool) or middle button
+        // pan with drag (pan tool) or middle button. Dragging detaches the
+        // image from fit-mode auto-centering.
         if response.dragged_by(egui::PointerButton::Middle)
             || (response.dragged_by(egui::PointerButton::Primary) && self.tool == Tool::Pan)
         {
+            if self.viewer.zoom.is_none() {
+                self.viewer.zoom = Some(zoom);
+                self.viewer.offset = base_offset;
+            }
             self.viewer.offset += response.drag_delta();
             ctx.request_repaint();
         }

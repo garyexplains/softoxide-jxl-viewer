@@ -4,6 +4,7 @@ pub mod app;
 pub mod cli;
 pub mod codec;
 pub mod dialogs;
+pub mod hdr;
 pub mod icons;
 pub mod nav;
 pub mod raster;

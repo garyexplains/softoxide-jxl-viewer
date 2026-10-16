@@ -114,6 +114,8 @@ pub struct LoadedImage {
     pub format: Format,
     pub via_fallback: bool,
     pub note: Option<String>,
+    /// "PQ" or "HLG" when the source was HDR (tone-mapped to SDR for display).
+    pub hdr: Option<&'static str>,
 }
 
 pub fn decode_file(path: &Path) -> Result<LoadedImage, String> {
@@ -135,19 +137,36 @@ pub fn decode_from_bytes(bytes: &[u8], ext_hint: Option<&str>) -> Result<LoadedI
 }
 
 /// JPEG XL decode preference order:
-/// * ≤8-bit: jxl-oxide (color managed to sRGB in pure Rust) → libjxl fallback.
-/// * >8-bit: libjxl first (exact 16-bit integer pipeline; jxl-oxide's float
+/// * HDR (PQ/HLG): jxl-oxide with a perceptual tone map to SDR (all bit depths).
+/// * ≤8-bit SDR: jxl-oxide (color managed to sRGB in pure Rust) → libjxl fallback.
+/// * >8-bit SDR: libjxl first (exact 16-bit integer pipeline; jxl-oxide's float
 ///   pipeline drifts ±1 LSB), jxl-oxide fallback for files libjxl can't read.
 fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
-    let header_bits = jxl_header_bits(bytes).ok().filter(|b| *b > 8);
+    let peek = jxl_header_peek(bytes).ok();
+    let hdr_tf = peek.and_then(|(_, hdr)| hdr);
+    let header_bits = peek.map(|(bits, _)| bits).filter(|b| *b > 8);
 
-    if let Some(_deep) = header_bits {
+    // HDR content: never take the integer paths — they would pass PQ/HLG
+    // samples through unconverted or clip them harshly. Decode in the source
+    // encoding as f32 and tone-map here.
+    if let Some(tf) = hdr_tf.map(|h| match h {
+        jxl_oxide::HdrType::Pq => crate::hdr::HdrTf::Pq,
+        jxl_oxide::HdrType::Hlg => crate::hdr::HdrTf::Hlg,
+    }) {
+        if let Ok(img) = decode_jxl_hdr_oxide(bytes, tf) {
+            return Ok(img);
+        }
+        // Fall through to the regular paths if the HDR decode failed.
+    }
+
+    if header_bits.is_some() {
         if let Ok(raster) = decode_jxl_libjxl(bytes, 16) {
             return Ok(LoadedImage {
                 raster,
                 format: Format::Jxl,
                 via_fallback: false,
                 note: Some("decoded with libjxl (16-bit exact path)".into()),
+                hdr: None,
             });
         }
     }
@@ -169,6 +188,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
                 format: Format::Jxl,
                 via_fallback: true,
                 note: Some(format!("decoded with libjxl fallback ({primary_err})")),
+                hdr: None,
             })
             .map_err(|fallback_err| {
                 format!("JPEG XL decode failed — jxl-oxide: {primary_err}; libjxl: {fallback_err}")
@@ -176,12 +196,119 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
     }
 }
 
-/// Cheap header peek for the file's sample bit depth.
-fn jxl_header_bits(bytes: &[u8]) -> Result<u32, String> {
+/// Cheap header peek for the file's sample bit depth and HDR transfer function.
+fn jxl_header_peek(bytes: &[u8]) -> Result<(u32, Option<jxl_oxide::HdrType>), String> {
     let image = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(bytes))
         .map_err(|e| format!("jxl header: {e}"))?;
-    Ok(image.image_header().metadata.bit_depth.bits_per_sample())
+    let bits = image.image_header().metadata.bit_depth.bits_per_sample();
+    Ok((bits, image.hdr_type()))
+}
+
+/// HDR (PQ/HLG) decode: renders in the source encoding as f32 and applies a
+/// perceptual tone map to sRGB. Avoids both failure modes of the integer
+/// paths (PQ passthrough, and harsh CMS clipping above SDR white).
+fn decode_jxl_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedImage, String> {
+    use jxl_oxide::JxlImage;
+
+    let mut image = JxlImage::builder()
+        .read(Cursor::new(bytes))
+        .map_err(|e| format!("jxl header: {e}"))?;
+    image.set_cms(jxl_oxide::Moxcms);
+
+    // Keep the source HDR encoding (don't let the CMS clip to SDR); we do the
+    // EOTF + tone map + gamut conversion ourselves.
+    let requested = match tf {
+        crate::hdr::HdrTf::Pq => {
+            jxl_oxide::EnumColourEncoding::bt2100_pq(jxl_oxide::RenderingIntent::Relative)
+        }
+        crate::hdr::HdrTf::Hlg => {
+            jxl_oxide::EnumColourEncoding::bt2100_hlg(jxl_oxide::RenderingIntent::Relative)
+        }
+    };
+    image.request_color_encoding(requested);
+
+    let peak_from_meta = image
+        .image_header()
+        .metadata
+        .tone_mapping
+        .intensity_target
+        .max(1.0);
+
+    let render = image
+        .render_frame(0)
+        .map_err(|e| format!("render frame: {e}"))?;
+    let mut stream = render.stream();
+    let width = stream.width();
+    let height = stream.height();
+    let channels = stream.channels() as usize;
+    let npix = width as usize * height as usize;
+
+    let has_alpha = image
+        .image_header()
+        .metadata
+        .ec_info
+        .iter()
+        .any(|ec| matches!(ec.ty, jxl_oxide::ExtraChannelType::Alpha { .. }));
+
+    // Read the raw encoded samples as f32.
+    let expect_len = npix * channels;
+    let mut raw = vec![0f32; expect_len];
+    {
+        let mut written = 0;
+        while written < expect_len {
+            let n = stream.write_to_buffer(&mut raw[written..]);
+            if n == 0 {
+                break;
+            }
+            written += n;
+        }
+    }
+
+    // Pass 1: EOTF → display-linear nits + measure the actual peak luma.
+    let mut nits = vec![0f32; npix * 3];
+    let mut peak: f32 = 0.0;
+    for i in 0..npix {
+        let base = i * channels;
+        let e = [raw[base], raw[base + 1], raw[base + 2]];
+        let lin = crate::hdr::encoded_to_nits(e, tf, peak_from_meta);
+        peak = peak.max(crate::hdr::luma2100(lin));
+        nits[i * 3..i * 3 + 3].copy_from_slice(&lin);
+    }
+    // Content peak: prefer the author's intent, but never below what's in the
+    // image; clamp to a sane range.
+    let peak_nits = if peak_from_meta >= 300.0 {
+        peak_from_meta.min(10000.0)
+    } else {
+        peak.clamp(300.0, 10000.0)
+    };
+
+    // Pass 2: tone map → gamut convert → sRGB OETF → u8, with alpha passthrough.
+    let mut out = vec![255u8; npix * 4];
+    for i in 0..npix {
+        let lin = [nits[i * 3], nits[i * 3 + 1], nits[i * 3 + 2]];
+        let srgb = crate::hdr::tonemap_to_srgb(lin, peak_nits);
+        out[i * 4] = (srgb[0] * 255.0 + 0.5) as u8;
+        out[i * 4 + 1] = (srgb[1] * 255.0 + 0.5) as u8;
+        out[i * 4 + 2] = (srgb[2] * 255.0 + 0.5) as u8;
+        if has_alpha && channels >= 4 {
+            let a = raw[i * channels + (channels - 1)].clamp(0.0, 1.0);
+            out[i * 4 + 3] = (a * 255.0 + 0.5) as u8;
+        }
+    }
+    let data = if has_alpha {
+        out
+    } else {
+        drop_alpha_to_rgb(&out)
+    };
+
+    Ok(LoadedImage {
+        raster: Raster::from_rgba8(width, height, has_alpha, data),
+        format: Format::Jxl,
+        via_fallback: false,
+        note: None,
+        hdr: Some(tf.as_str()),
+    })
 }
 
 fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
@@ -227,6 +354,7 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
             format: Format::Jxl,
             via_fallback: false,
             note: None,
+            hdr: None,
         });
     }
 
@@ -238,6 +366,7 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         format: Format::Jxl,
         via_fallback: false,
         note: None,
+        hdr: None,
     })
 }
 
@@ -373,6 +502,7 @@ fn decode_with_image_crate(
             format,
             via_fallback: false,
             note: None,
+            hdr: None,
         });
     }
     if let image::DynamicImage::ImageRgb16(rgb16) = &dynamic {
@@ -381,6 +511,7 @@ fn decode_with_image_crate(
             format,
             via_fallback: false,
             note: None,
+            hdr: None,
         });
     }
     if let image::DynamicImage::ImageLumaA16(la) = &dynamic {
@@ -397,6 +528,7 @@ fn decode_with_image_crate(
             format,
             via_fallback: false,
             note: None,
+            hdr: None,
         });
     }
     if let image::DynamicImage::ImageLuma16(l) = &dynamic {
@@ -412,6 +544,7 @@ fn decode_with_image_crate(
             format,
             via_fallback: false,
             note: None,
+            hdr: None,
         });
     }
 
@@ -433,6 +566,7 @@ fn decode_with_image_crate(
         format,
         via_fallback: false,
         note: None,
+        hdr: None,
     })
 }
 
@@ -665,8 +799,12 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
     let format = detect_format(bytes, ext);
     let img = decode_from_bytes(bytes, ext)?;
     let r = &img.raster;
+    let hdr_line = match img.hdr {
+        Some(h) => format!("\nHDR: {} (tone-mapped to SDR for display)", h),
+        None => String::new(),
+    };
     Ok(format!(
-        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}\nanimated: n/a (first frame shown){}{}",
+        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}\nanimated: n/a (first frame shown){}{}{}",
         format.as_str(),
         format,
         r.width,
@@ -683,6 +821,7 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
             .as_ref()
             .map(|n| format!("\nnote: {n}"))
             .unwrap_or_default(),
+        hdr_line,
         format!("\nfile size: {} bytes", bytes.len()),
     ))
 }

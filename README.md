@@ -11,6 +11,10 @@ views. It runs unchanged on Windows, macOS and Linux.
 
 ### Viewing
 - Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF, WebP.
+- **HDR support**: PQ (ST 2084) and HLG (BT.2100) files are detected automatically, decoded
+  as float, and perceptually tone-mapped to SDR (extended Reinhard, BT.2408 203-nit reference
+  white, Rec.2100 → sRGB gamut conversion). HDR files are tagged in the title bar, status line
+  and `info` output.
 - Pure-Rust JXL decode with **color management to sRGB** (moxcms) — CMYK/ICC-profile files render.
 - Zoom (wheel at pointer), pan (drag), fit / 1:1, checkerboard behind transparency.
   Pixel snapping at high zoom, linear filtering otherwise.
@@ -106,6 +110,7 @@ src/
   raster.rs   Raster pixel buffer (RGB/RGBA, 8/16-bit), crop/rotate/flip/resize
   codec.rs    format sniffing, decode dispatch, save encoders
   icons.rs    vendored Phosphor icon font (assets/fonts/Phosphor.ttf)
+  hdr.rs      HDR → SDR: PQ/HLG EOTFs, tone mapping, Rec.2100 → sRGB
   nav.rs      folder navigation: prev/next image by name or mtime
 jxl-native/   permissively-licensed libjxl FFI (encode + basic decode), vendored cmake build
 third_party/  fetched libjxl checkout (not committed)
@@ -120,6 +125,8 @@ Decisions worth knowing:
 - Animated JXL/GIF show the first frame.
 - Lossless JXL of grayscale sources is currently rewritten as RGB (channel expansion) — smaller
   gray-true encoding planned.
+- **HDR** (PQ/HLG) files are tone-mapped to SDR for display and for SDR exports; there is no
+  HDR (float/PQ) *save* path yet.
 
 ## License
 

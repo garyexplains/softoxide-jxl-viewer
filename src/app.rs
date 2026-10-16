@@ -25,6 +25,8 @@ pub(crate) struct Document {
     pub(crate) format: codec::Format,
     pub(crate) raster: Raster,
     pub(crate) dirty: bool,
+    /// "PQ"/"HLG" when the source was HDR (display is tone-mapped to SDR).
+    pub(crate) hdr: Option<&'static str>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -232,6 +234,7 @@ impl App {
                     format: img.format,
                     raster: img.raster,
                     dirty: false,
+                    hdr: img.hdr,
                 });
                 if let Some(note) = &img.note {
                     self.error = Some(note.clone());
@@ -243,8 +246,12 @@ impl App {
                 self.viewer = ViewerState::default(); // fit zoom
                 self.needs_rebuild = true;
                 self.last_dir = path.parent().map(|p| p.to_path_buf());
+                let hdr_note = match img.hdr {
+                    Some(h) => format!(", {h} HDR tone-mapped to SDR"),
+                    None => String::new(),
+                };
                 self.status = format!(
-                    "Opened {} — {} × {}, {}-bit{}",
+                    "Opened {} — {} × {}, {}-bit{}{}",
                     file_name(&path),
                     w,
                     h,
@@ -258,7 +265,8 @@ impl App {
                         ", alpha"
                     } else {
                         ""
-                    }
+                    },
+                    hdr_note,
                 );
             }
             Err(e) => self.error = Some(e),
@@ -669,10 +677,11 @@ impl App {
                     .map(|p| file_name(p))
                     .unwrap_or_else(|| "untitled".into());
                 format!(
-                    "JXL Viewer — {name}{} ({}{})",
+                    "JXL Viewer — {name}{} ({}{}{})",
                     if doc.dirty { "*" } else { "" },
                     doc.format.as_str(),
-                    if doc.raster.has_alpha { ", alpha" } else { "" }
+                    if doc.raster.has_alpha { ", alpha" } else { "" },
+                    if doc.hdr.is_some() { ", HDR" } else { "" }
                 )
             }
             None => "JXL Viewer — open an image".to_string(),

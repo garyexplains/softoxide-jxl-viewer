@@ -6,10 +6,9 @@
 //!   modular mode / tiling via modular group size).
 //! * PNG/JPEG/GIF/BMP/TIFF/WebP: `image` crate.
 
-use std::io::Cursor;
-use std::path::Path;
-
 use image::ImageEncoder as _;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use crate::raster::Raster;
 use jxl_native::{GroupSize, Pixels};
@@ -961,9 +960,20 @@ pub fn encode_to_vec(raster: &Raster, opts: &SaveOptions) -> Result<Vec<u8>, Str
     }
 }
 
+/// Writes via a `.part` sibling file + rename, so an interrupted save (crash,
+/// or the app being closed mid-encode) can never leave a truncated image at
+/// `path` — the rename is the only step that touches the real file.
+fn write_atomic(path: &Path, buf: &[u8]) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".part");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, buf).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("finalize {}: {e}", tmp.display()))
+}
+
 pub fn save_to_path(path: &Path, raster: &Raster, opts: &SaveOptions) -> Result<(), String> {
     let buf = encode_to_vec(raster, opts)?;
-    std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
+    write_atomic(path, &buf)
 }
 
 /// Saves an animation. GIF → animated GIF; JPEG XL → animated JXL
@@ -980,7 +990,7 @@ pub fn save_animation_to_path(
         SaveOptions::Jxl(j) => encode_anim_jxl(frames, durations_ms, loops, j)?,
         other => return Err(format!("{:?} does not support animated save", other)),
     };
-    std::fs::write(path, buf).map_err(|e| format!("write {}: {e}", path.display()))
+    write_atomic(path, &buf)
 }
 
 /// Encodes frames as an animated JPEG XL (sRGB; lossless or lossy per the

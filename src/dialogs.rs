@@ -408,7 +408,11 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button(format!("{}  Resize", icons::CHECK_CIRCLE))
+                    .add_enabled(
+                        app.busy.is_none(),
+                        egui::Button::new(format!("{}  Resize", icons::CHECK_CIRCLE)),
+                    )
+                    .on_hover_text("Disabled while a save is in progress")
                     .clicked()
                 {
                     let (w, h) = (d.width as u32, d.height as u32);

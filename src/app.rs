@@ -104,6 +104,8 @@ pub struct App {
     pub(crate) resize_dialog: Option<ResizeDialogState>,
 
     pub(crate) busy: Option<String>,
+    /// When the current save job started, for the elapsed-seconds readout.
+    pub(crate) busy_started: Option<std::time::Instant>,
     pub(crate) task_rx: Option<Receiver<UiMsg>>,
     pub(crate) last_dir: Option<PathBuf>,
     pub(crate) status: String,
@@ -141,6 +143,7 @@ impl App {
             save_dialog: None,
             resize_dialog: None,
             busy: None,
+            busy_started: None,
             task_rx: None,
             last_dir: None,
             status: String::new(),
@@ -166,6 +169,9 @@ impl App {
         ctx: &egui::Context,
         op: impl FnOnce(&Raster) -> Result<Raster, String>,
     ) {
+        if self.busy.is_some() {
+            return; // strict lockout: document is locked while saving
+        }
         let Some(old) = self.doc.as_ref().map(|d| d.raster.clone()) else {
             self.error = Some("no image open".into());
             return;
@@ -208,12 +214,18 @@ impl App {
     }
 
     pub(crate) fn apply_crop(&mut self, ctx: &egui::Context) {
+        if self.busy.is_some() {
+            return; // strict lockout
+        }
         if let Some(r) = self.crop_rect.take() {
             self.apply_edit(ctx, move |ra| Ok(ra.crop(r)));
         }
     }
 
     pub(crate) fn undo_last(&mut self, ctx: &egui::Context) {
+        if self.busy.is_some() {
+            return; // strict lockout
+        }
         let Some(prev) = self.undo.pop() else { return };
         if let Some(doc) = &self.doc {
             self.redo.push(doc.raster.clone());
@@ -229,6 +241,9 @@ impl App {
     }
 
     pub(crate) fn redo_last(&mut self, ctx: &egui::Context) {
+        if self.busy.is_some() {
+            return; // strict lockout
+        }
         let Some(next) = self.redo.pop() else { return };
         if let Some(doc) = &self.doc {
             self.undo.push(doc.raster.clone());
@@ -253,6 +268,10 @@ impl App {
     }
 
     pub(crate) fn open_path(&mut self, path: PathBuf) {
+        // Strict lockout: covers Open, drag-&-drop, and folder navigation.
+        if self.busy.is_some() {
+            return;
+        }
         match codec::decode_file(&path) {
             Ok(img) => {
                 let w = img.raster.width;
@@ -316,10 +335,16 @@ impl App {
     }
 
     pub(crate) fn start_save_job(&mut self, path: PathBuf, opts: SaveOptions) {
+        // Strict lockout backstop: every UI entry point is gated while a job
+        // runs; this guarantees no second job can ever start.
+        if self.busy.is_some() {
+            return;
+        }
         let Some(doc) = self.doc.clone() else { return };
         let (tx, rx) = mpsc::channel::<UiMsg>();
         self.task_rx = Some(rx);
         self.busy = Some(format!("Encoding {}…", file_name(&path)));
+        self.busy_started = Some(std::time::Instant::now());
         self.status.clear();
         self.save_dialog = None;
         let raster = doc.raster;
@@ -358,15 +383,21 @@ impl App {
                 match msg {
                     UiMsg::Done(Ok(what)) => {
                         self.busy = None;
+                        self.busy_started = None;
                         self.status = what;
                     }
                     UiMsg::Done(Err(e)) => {
                         self.busy = None;
+                        self.busy_started = None;
                         self.error = Some(e);
                     }
                 }
                 self.task_rx = None;
                 ctx.request_repaint();
+            } else {
+                // Keep the spinner animating and the elapsed counter ticking
+                // even when nothing else wants a repaint.
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
     }
@@ -449,9 +480,12 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if let Some(first) = dropped.first() {
-            self.open_explicit(first.clone());
-            ctx.request_repaint();
+        // Strict lockout: no new documents while a save job runs.
+        if self.busy.is_none() {
+            if let Some(first) = dropped.first() {
+                self.open_explicit(first.clone());
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -579,6 +613,11 @@ impl App {
             return;
         }
 
+        // Strict lockout while a save job runs — mirrors the greyed toolbar
+        // buttons. Viewing shortcuts (zoom, animation) stay live; everything
+        // that replaces or mutates the document is ignored.
+        let locked = self.busy.is_some();
+
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         let shift = ctx.input(|i| i.modifiers.shift);
         let plain = ctx.input(|i| {
@@ -587,21 +626,21 @@ impl App {
         });
 
         // ---- undo / redo ---------------------------------------------------
-        if ctrl && !shift && pressed(Key::Z) {
+        if ctrl && !shift && pressed(Key::Z) && !locked {
             self.undo_last(ctx);
             return;
         }
-        if ctrl && (pressed(Key::Y) || (shift && pressed(Key::Z))) {
+        if ctrl && (pressed(Key::Y) || (shift && pressed(Key::Z))) && !locked {
             self.redo_last(ctx);
             return;
         }
 
         // ---- file ------------------------------------------------------------
-        if ctrl && pressed(Key::O) {
+        if ctrl && pressed(Key::O) && !locked {
             self.pick_open_file();
             return;
         }
-        if ctrl && pressed(Key::S) {
+        if ctrl && pressed(Key::S) && !locked {
             if self.doc.is_some() {
                 self.save_dialog = Some(SaveDialogState {
                     format: SaveFormat::Jxl,
@@ -650,25 +689,25 @@ impl App {
         if !has_doc {
             return;
         }
-        if plain && pressed(Key::R) {
+        if plain && pressed(Key::R) && !locked {
             self.apply_edit(ctx, |r| Ok(r.rotate_cw()));
             return;
         }
-        if plain && pressed(Key::L) {
+        if plain && pressed(Key::L) && !locked {
             self.apply_edit(ctx, |r| Ok(r.rotate_ccw()));
             return;
         }
-        if plain && pressed(Key::H) {
+        if plain && pressed(Key::H) && !locked {
             self.apply_edit(ctx, |r| Ok(r.flip_h()));
             return;
         }
-        if plain && pressed(Key::V) {
+        if plain && pressed(Key::V) && !locked {
             self.apply_edit(ctx, |r| Ok(r.flip_v()));
             return;
         }
 
         // ---- crop selection --------------------------------------------------
-        if self.tool == Tool::Crop && self.crop_rect.is_some() && pressed(Key::Enter) {
+        if self.tool == Tool::Crop && self.crop_rect.is_some() && pressed(Key::Enter) && !locked {
             self.apply_crop(ctx);
             return;
         }
@@ -700,6 +739,10 @@ impl App {
             pressed(Key::Home),
         );
         if !(left || right || up || down || home) {
+            return;
+        }
+        // Strict lockout: navigation replaces the document mid-save.
+        if locked {
             return;
         }
 
@@ -837,8 +880,14 @@ impl App {
 
     fn show_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal_wrapped(|ui| {
+            // Strict lockout while a save job runs: document-mutating buttons
+            // go grey; viewing (pan/zoom/animation) stays live.
+            let locked = self.busy.is_some();
             if ui
-                .button(format!("{}  Open…", icons::FOLDER_OPEN))
+                .add_enabled(
+                    !locked,
+                    egui::Button::new(format!("{}  Open…", icons::FOLDER_OPEN)),
+                )
                 .on_hover_text("Open an image (Ctrl+O)")
                 .clicked()
             {
@@ -847,9 +896,10 @@ impl App {
             ui.separator();
 
             let has = self.doc.is_some();
+            let can_edit = has && !locked;
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Undo", icons::ARROW_COUNTER_CLOCKWISE)),
                 )
                 .on_hover_text("Undo (Ctrl+Z)")
@@ -859,7 +909,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    has && !self.redo.is_empty(),
+                    can_edit && !self.redo.is_empty(),
                     egui::Button::new(format!("{}  Redo", icons::ARROW_CLOCKWISE)),
                 )
                 .on_hover_text("Redo (Ctrl+Y)")
@@ -935,7 +985,7 @@ impl App {
 
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Rotate L", icons::ARROW_COUNTER_CLOCKWISE)),
                 )
                 .on_hover_text("Rotate 90° left (L)")
@@ -945,7 +995,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Rotate R", icons::ARROW_CLOCKWISE)),
                 )
                 .on_hover_text("Rotate 90° right (R)")
@@ -955,7 +1005,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Flip H", icons::FLIP_HORIZONTAL)),
                 )
                 .on_hover_text("Flip horizontally (H)")
@@ -965,7 +1015,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Flip V", icons::FLIP_VERTICAL)),
                 )
                 .on_hover_text("Flip vertically (V)")
@@ -977,7 +1027,7 @@ impl App {
 
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Resize…", icons::ARROWS_OUT_CARDINAL)),
                 )
                 .clicked()
@@ -997,7 +1047,7 @@ impl App {
             ui.separator();
             if ui
                 .add_enabled(
-                    has,
+                    can_edit,
                     egui::Button::new(format!("{}  Save as…", icons::FLOPPY_DISK)),
                 )
                 .on_hover_text("Save as… (Ctrl+S)")
@@ -1034,6 +1084,9 @@ impl App {
     }
 
     fn pick_open_file(&mut self) {
+        if self.busy.is_some() {
+            return; // strict lockout
+        }
         let mut dialog = rfd::FileDialog::new().set_title("Open image");
         if let Some(dir) = &self.last_dir {
             dialog = dialog.set_directory(dir);
@@ -1181,7 +1234,8 @@ impl App {
             }
             if let Some(busy) = &self.busy {
                 ui.spinner();
-                ui.label(busy);
+                let secs = self.busy_started.map_or(0, |t| t.elapsed().as_secs());
+                ui.label(format!("{busy} ({secs}s)"));
             }
             if let Some(err) = &self.error {
                 ui.colored_label(

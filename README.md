@@ -45,9 +45,9 @@ views. It runs unchanged on Windows, macOS and Linux.
 
 Shortcuts never fire while a text field has focus; while the Save-As or Resize dialog is
 open, only `Esc` acts. While an encode runs (busy spinner in the status bar, with elapsed
-seconds), saving, editing, Open/drag-drop and folder navigation are locked; pan/zoom and
-animation playback stay live. Files are written via a temporary `.part` file and renamed,
-so a save can never leave a truncated image behind.
+seconds), saving, editing, the crop tool, Open/drag-drop and folder navigation are locked;
+pan/zoom and animation playback stay live. Files are written via a temporary `.part` file
+and renamed, so a save can never leave a truncated image behind.
 
 ### Editing
 - **Crop** (drag a selection, live size readout), **resize** with real resamplers

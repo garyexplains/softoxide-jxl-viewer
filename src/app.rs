@@ -660,7 +660,7 @@ impl App {
             ctx.request_repaint();
             return;
         }
-        if plain && pressed(Key::C) {
+        if plain && pressed(Key::C) && !locked {
             self.tool = Tool::Crop;
             self.crop_rect = None;
             self.crop_drag = None;
@@ -929,7 +929,13 @@ impl App {
                 self.crop_drag = None;
             }
             if ui
-                .selectable_label(self.tool == Tool::Crop, format!("{}  Crop", icons::CROP))
+                .add_enabled(
+                    !locked,
+                    egui::Button::selectable(
+                        self.tool == Tool::Crop,
+                        format!("{}  Crop", icons::CROP),
+                    ),
+                )
                 .on_hover_text("Crop tool (C) — drag a selection, Enter to apply, Esc to cancel")
                 .clicked()
             {

@@ -96,6 +96,33 @@ cargo build --release
 `JXL_LIBJXL_DIR` can point at another libjxl checkout instead of the pinned one.
 First build compiles libjxl from scratch and takes several minutes.
 
+### App icon & packaging
+
+The icon (indigo→teal rounded square with white "JXL" strokes and an amber accent)
+is original artwork generated from vector math — regenerate everything with:
+
+```sh
+cargo run --release --example gen_icon
+```
+
+- **Windows** — `assets/icon.ico` is embedded into the executable at build time
+  (`build.rs` + winresource); Explorer, the taskbar and the window all show it.
+- **macOS** — build an app bundle: create `jxlviewer.app/Contents/{MacOS,Resources}`,
+  copy the binary to `MacOS/jxlviewer` and `assets/icon.icns` to
+  `Resources/jxlviewer.icns`, and add an `Info.plist` with
+  `CFBundleIconFile` = `jxlviewer`.
+- **Linux** — install icons and desktop entry:
+
+  ```sh
+  for s in 16 32 48 64 128 256; do
+    install -Dm644 assets/icons/jxlviewer-$s.png \
+      ~/.local/share/icons/hicolor/${s}x${s}/apps/jxlviewer.png
+  done
+  install -m644 assets/jxlviewer.desktop ~/.local/share/applications/
+  ```
+  (Window/taskbar icons also work on X11 without a desktop entry; Wayland
+  requires it.)
+
 ## Running
 
 ```sh

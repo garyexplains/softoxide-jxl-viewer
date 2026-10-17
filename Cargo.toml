@@ -33,6 +33,10 @@ rfd = "0.15"
 # Animated GIF decode (full disposal/blend handling)
 gif = "0.14"
 
+[build-dependencies]
+# Embeds assets/icon.ico into the Windows executable (Explorer/taskbar icon).
+winresource = "0.1"
+
 [dev-dependencies]
 filetime = "0.2"
 png = "0.18"

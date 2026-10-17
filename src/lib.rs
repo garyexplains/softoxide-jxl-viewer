@@ -115,7 +115,8 @@ pub fn run_gui(path: Option<PathBuf>) {
 
     let mut builder = eframe::egui::ViewportBuilder::default()
         .with_inner_size(init_size)
-        .with_min_inner_size(MIN_WINDOW_SIZE);
+        .with_min_inner_size(MIN_WINDOW_SIZE)
+        .with_icon(load_icon());
     if cfg!(windows) {
         builder = builder.with_position(eframe::egui::pos2(position[0], position[1]));
     }
@@ -133,6 +134,24 @@ pub fn run_gui(path: Option<PathBuf>) {
         }),
     )
     .expect("gui should not fail to start");
+}
+
+/// Runtime window icon (Windows window/taskbar, X11 alt-tab). macOS instead
+/// uses `assets/icon.icns` inside the app bundle. Embedded at compile time —
+/// no filesystem access needed.
+fn load_icon() -> eframe::egui::IconData {
+    let png = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/icons/jxlviewer-64.png"
+    ));
+    let img = image::load_from_memory(png)
+        .expect("bundled icon must decode")
+        .to_rgba8();
+    eframe::egui::IconData {
+        width: img.width(),
+        height: img.height(),
+        rgba: img.into_raw(),
+    }
 }
 
 /// CLI entry — parses `std::env::args()` and executes; returns a process exit code.

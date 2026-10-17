@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=jxlviewer
+GenericName=Image Viewer
+Comment=View, edit and convert images — JPEG XL first-class
+Exec=jxlviewer %f
+Icon=jxlviewer
+Categories=Graphics;Viewer;2DGraphics;
+MimeType=image/jxl;image/x-jxl;
+Terminal=false

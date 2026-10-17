@@ -9,3 +9,10 @@ jxl-native/target/
 .idea/
 .vscode/
 *.swp
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Atomic-write leftovers (only exist if a save was interrupted at a crash)
+*.part

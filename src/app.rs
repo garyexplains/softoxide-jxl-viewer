@@ -864,14 +864,14 @@ impl App {
                     .map(|p| file_name(p))
                     .unwrap_or_else(|| "untitled".into());
                 format!(
-                    "JXL Viewer — {name}{} ({}{}{})",
+                    "SoftOxide JXL Viewer — {name}{} ({}{}{})",
                     if doc.dirty { "*" } else { "" },
                     doc.format.as_str(),
                     if doc.raster.has_alpha { ", alpha" } else { "" },
                     if doc.hdr.is_some() { ", HDR" } else { "" }
                 )
             }
-            None => "JXL Viewer — open an image".to_string(),
+            None => "SoftOxide JXL Viewer — open an image".to_string(),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }

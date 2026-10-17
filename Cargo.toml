@@ -6,8 +6,13 @@ resolver = "3"
 name = "jxlviewer"
 version = "0.1.0"
 edition = "2024"
-description = "Native JPEG XL image viewer, editor and converter (Windows/macOS/Linux)"
+description = "SoftOxide JXL Viewer — native JPEG XL image viewer, editor and converter (Windows/macOS/Linux)"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/garyexplains/softoxide-jxl-viewer"
+readme = "README.md"
+keywords = ["jpeg-xl", "jxl", "image-viewer", "image-converter", "gui"]
+categories = ["multimedia::images"]
+authors = ["Gary Sims"]
 
 [dependencies]
 jxl-native = { path = "jxl-native" }

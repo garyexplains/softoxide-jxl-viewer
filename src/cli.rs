@@ -33,7 +33,7 @@ pub const CONVERT_HELP: &str = "convert usage:\n  jxlviewer convert IN OUT [--lo
  Examples:\n  jxlviewer convert sample.jxl out.png\n  \
  jxlviewer convert sample.png out.jxl --lossless --group-size 256 --modular";
 
-pub const MAIN_HELP: &str = "jxlviewer — native JPEG XL viewer & converter (all rendering in-app)\n\n\
+pub const MAIN_HELP: &str = "jxlviewer — SoftOxide JXL Viewer (native JPEG XL viewer & converter, all rendering in-app)\n\n\
  Usage:\n  jxlviewer [FILE]              open the GUI (optionally with FILE)\n\
    jxlviewer info FILE…          print file metadata\n\
    jxlviewer convert IN OUT …    headless conversion\n\

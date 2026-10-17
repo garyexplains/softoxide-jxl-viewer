@@ -57,10 +57,10 @@ open, only `Esc` acts.
 ### Conversion
 - **Save as** JPEG XL, PNG, JPEG, BMP, TIFF — right in the GUI (Save As dialog with per-format
   options).
-- **JPEG XL save options**: one-click **presets** (Lossless, Visually lossless, Balanced, Small,
-  Fast) plus *lossless* (mathematically lossless), *distance* (VarDCT quality,
-  1.0 ≈ visually lossless), *effort* (1–10), *keep/drop alpha*, *modular mode* and **tile size**
-  (modular group size: 128/256/512/1024 or encoder default).
+- **JPEG XL save options**: one-click **presets** (Lossless, Visually lossless, Small — each
+  also in a *fast* effort-3 variant) plus *lossless* (mathematically lossless), *distance*
+  (VarDCT quality, 1.0 ≈ visually lossless), *effort* (1–10), *keep/drop alpha*, *modular mode*
+  and **tile size** (modular group size: 128/256/512/1024 or encoder default).
 - **Headless CLI** for scripting & batch use:
   - `jxlviewer convert IN OUT [--lossless] [--distance 1.0] [--effort 7] [--modular]
     [--group-size 256] [--keep-alpha] [--quality 90]`

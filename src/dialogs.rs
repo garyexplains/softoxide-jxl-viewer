@@ -170,15 +170,23 @@ struct JxlPreset {
 }
 
 /// Presets grounded in measurements on a 1920×1080 photo-like image
-/// (`examples/gen_photo.rs`): lossless ≈ 22% of PNG, d1.0 ≈ 8%, d2.0 ≈ 3%,
-/// d4.0 ≈ 0.6%. Effort shifts size a few % and encode time a lot.
+/// (`examples/gen_photo.rs`): lossless ≈ 22% of PNG (effort 3: ≈ 38%),
+/// d1.0 ≈ 8% (effort 3: ≈ 9%), d2.0 ≈ 3%, d4.0 ≈ 0.6%. Effort trades encode
+/// time for a few % of size; distance does the heavy lifting.
 const JXL_PRESETS: &[JxlPreset] = &[
     JxlPreset {
         name: "Lossless",
-        tip: "Pixel-perfect (distance 0, modular).\nTypically 20–60% of the PNG size.",
+        tip: "Pixel-perfect (distance 0, modular), effort 7.\nTypically 20–60% of the PNG size.",
         lossless: true,
         distance: 0.0,
         effort: 7,
+    },
+    JxlPreset {
+        name: "Lossless & fast",
+        tip: "Pixel-perfect, effort 3 — several times faster;\nnoticeably larger files.",
+        lossless: true,
+        distance: 0.0,
+        effort: 3,
     },
     JxlPreset {
         name: "Visually lossless",
@@ -188,24 +196,24 @@ const JXL_PRESETS: &[JxlPreset] = &[
         effort: 7,
     },
     JxlPreset {
-        name: "Balanced",
-        tip: "Distance 2.0, effort 7.\n~3× smaller than visually lossless; mild softening side-by-side.",
+        name: "Visually lossless & fast",
+        tip: "Distance 1.0, effort 3 — same quality, several times faster;\na few % larger.",
         lossless: false,
-        distance: 2.0,
-        effort: 7,
+        distance: 1.0,
+        effort: 3,
     },
     JxlPreset {
         name: "Small",
-        tip: "Distance 4.0, effort 7.\nThumbnails/web previews; clearly lossy.",
+        tip: "Distance 3.0, effort 7.\nClearly lossy — web previews/thumbnails.",
         lossless: false,
-        distance: 4.0,
+        distance: 3.0,
         effort: 7,
     },
     JxlPreset {
-        name: "Fast",
-        tip: "Distance 1.0, effort 3.\nSame quality as the default, several times faster; a few % larger.",
+        name: "Small & fast",
+        tip: "Distance 4.0, effort 3 — fastest small output;\nclearly lossy.",
         lossless: false,
-        distance: 1.0,
+        distance: 4.0,
         effort: 3,
     },
 ];

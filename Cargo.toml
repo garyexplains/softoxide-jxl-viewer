@@ -17,8 +17,27 @@ authors = ["Gary Sims"]
 [dependencies]
 jxl-native = { path = "jxl-native" }
 
-# GUI — rendered entirely by the app itself (no OS widget toolkits)
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+# GUI — rendered entirely by the app itself (no OS widget toolkits).
+# The renderer is picked explicitly at runtime in src/lib.rs::run_gui
+# (windows: wgpu with Direct3D 12, everything else: glow/OpenGL), so Cargo
+# feature unification in other dependencies can never silently change it.
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "wgpu_no_default_features",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+
+# wgpu features needed by the Windows renderer, enabled explicitly so feature
+# unification cannot accidentally drop them (eframe's plain "wgpu" feature
+# would pull *all* wgpu backends; wgpu_no_default_features lets us pick):
+#   - "dx12": Direct3D 12 backend (its deps are windows-target-gated, so this
+#     is inert when building for macOS/Linux)
+#   - "wgsl": egui ships its GPU shaders as WGSL source
+#   - "std":  required with default-features off for native builds
+# Version must track the wgpu that eframe 0.37 / egui-wgpu 0.37 links against.
+wgpu = { version = "30.0", default-features = false, features = ["dx12", "wgsl", "std"] }
 
 # Common formats (PNG / JPEG / GIF / BMP / TIFF / WebP)
 image = "0.25"

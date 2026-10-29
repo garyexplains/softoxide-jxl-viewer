@@ -110,6 +110,12 @@ fn windows_initial_window_logical() -> Option<([f32; 2], [f32; 2])> {
 pub fn run_gui(path: Option<PathBuf>) {
     let mut options = eframe::NativeOptions::default();
 
+    options.renderer = selected_renderer();
+    #[cfg(windows)]
+    {
+        options.wgpu_options = windows_wgpu_configuration();
+    }
+
     let (init_size, position) =
         windows_initial_window_logical().unwrap_or((DEFAULT_WINDOW_SIZE, [0.0, 0.0]));
 
@@ -122,7 +128,7 @@ pub fn run_gui(path: Option<PathBuf>) {
     }
     options.viewport = builder;
 
-    eframe::run_native(
+    if let Err(err) = eframe::run_native(
         "jxlviewer",
         options,
         Box::new(move |cc| {
@@ -132,8 +138,157 @@ pub fn run_gui(path: Option<PathBuf>) {
             }
             Ok(Box::new(a))
         }),
+    ) {
+        report_gui_failure(&err);
+        std::process::exit(1);
+    }
+}
+
+/// The renderer used on each platform:
+/// * Windows — the `wgpu` renderer over Direct3D 12 (see
+///   `windows_wgpu_configuration`).
+/// * macOS / Linux — the `glow` (OpenGL) renderer, unchanged from before.
+///
+/// Both renderers are compiled in on every platform (see `Cargo.toml`), and
+/// the choice is made here explicitly at runtime so that Cargo feature
+/// unification across the dependency graph can never silently flip a build
+/// to a different renderer.
+fn selected_renderer() -> eframe::Renderer {
+    if cfg!(windows) {
+        eframe::Renderer::Wgpu
+    } else {
+        eframe::Renderer::Glow
+    }
+}
+
+/// Prints a failure message instead of eframe's default panic, with
+/// renderer-specific hints, and lets the caller exit.
+fn report_gui_failure(err: &eframe::Error) {
+    eprintln!("jxlviewer: the GUI failed to start: {err}");
+    #[cfg(windows)]
+    {
+        if let eframe::Error::Wgpu(_) = err {
+            eprintln!(
+                "hint: Windows rendering needs a Direct3D 12 adapter that can present to the window."
+            );
+            eprintln!(
+                "      Install or update your GPU driver (any modern GPU provides Direct3D 12)."
+            );
+            eprintln!(
+                "      On machines without a GPU, a CPU adapter (Microsoft Basic Render Driver/WARP)"
+            );
+            eprintln!(
+                "      is attempted as a best-effort fallback; if the driver does not expose one,"
+            );
+            eprintln!("      rendering is not possible.");
+        }
+    }
+}
+
+/// Builds the wgpu configuration for the Windows (wgpu) renderer: Direct3D 12
+/// only, with hardware-first adapter selection that verifies the window
+/// surface and falls back to CPU/software rendering only when necessary.
+///
+/// Notes:
+/// * `Backends::DX12` pins the backend; the `wgpu` dependency in `Cargo.toml`
+///   compiles exactly that backend (plus WGSL shader support).
+/// * `eframe` injects the winit display handle into the instance
+///   (`WgpuSetupCreateNew::display_handle`), and passes the real window
+///   surface into `select_dx12_adapter`, so adapter selection is
+///   surface-aware.
+#[cfg(windows)]
+fn windows_wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+
+    let mut create = WgpuSetupCreateNew::without_display_handle();
+    create.instance_descriptor.backends = eframe::egui_wgpu::wgpu::Backends::DX12;
+    create.native_adapter_selector = Some(std::sync::Arc::new(select_dx12_adapter));
+
+    eframe::egui_wgpu::WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(create),
+        ..Default::default()
+    }
+}
+
+/// Sort key for adapter preference: discrete GPUs first, then integrated,
+/// then everything hardware-ish; CPU adapters (software rendering) last.
+#[cfg(windows)]
+fn adapter_rank(device_type: eframe::egui_wgpu::wgpu::DeviceType) -> u8 {
+    use eframe::egui_wgpu::wgpu::DeviceType;
+    match device_type {
+        DeviceType::DiscreteGpu => 0,
+        DeviceType::IntegratedGpu => 1,
+        DeviceType::VirtualGpu => 2,
+        DeviceType::Other => 3,
+        DeviceType::Cpu => 4,
+    }
+}
+
+/// Describes an adapter for diagnostics.
+#[cfg(windows)]
+fn describe_adapter(adapter: &eframe::egui_wgpu::wgpu::Adapter) -> String {
+    let info = adapter.get_info();
+    format!(
+        "\"{}\" ({:?}, {:?}, driver {} {})",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info
     )
-    .expect("gui should not fail to start");
+}
+
+/// Adapter selection for the Windows (wgpu) renderer.
+///
+/// Prefers a hardware adapter that can present to the window; only when no
+/// compatible hardware adapter exists does it fall back to a CPU adapter
+/// (Direct3D 12 software rasterizer, e.g. Microsoft Basic Render Driver /
+/// WARP). Every candidate is checked against the actual window surface via
+/// `Adapter::is_surface_supported`, so an adapter that cannot present the
+/// window is never chosen.
+///
+/// Software rendering is a best-effort path: the CPU/WARP fallback is *not*
+/// yet verified on Windows and may still fail (or perform poorly); it is
+/// attempted only because using no GPU is worse than a slow frame.
+#[cfg(windows)]
+fn select_dx12_adapter(
+    adapters: &[eframe::egui_wgpu::wgpu::Adapter],
+    surface: Option<&eframe::egui_wgpu::wgpu::Surface<'_>>,
+) -> Result<eframe::egui_wgpu::wgpu::Adapter, String> {
+    use eframe::egui_wgpu::wgpu::DeviceType;
+
+    let compatible: Vec<eframe::egui_wgpu::wgpu::Adapter> = match surface {
+        Some(surface) => adapters
+            .iter()
+            .cloned()
+            .filter(|a| a.is_surface_supported(surface))
+            .collect(),
+        None => adapters.to_vec(),
+    };
+
+    if let Some(adapter) = compatible
+        .iter()
+        .min_by_key(|a| adapter_rank(a.get_info().device_type))
+    {
+        // Only a CPU adapter left: tell the user what is happening, without
+        // promising it will work.
+        if adapter.get_info().device_type == DeviceType::Cpu {
+            eprintln!(
+                "jxlviewer: no hardware Direct3D 12 adapter compatible with the window was found;"
+            );
+            eprintln!(
+                "           falling back to software rendering ({}), best-effort and untested.",
+                describe_adapter(adapter)
+            );
+        }
+        return Ok(adapter.clone());
+    }
+
+    Err(format!(
+        "no usable Direct3D 12 adapter compatible with the window; {} adapter(s) present: {}",
+        adapters.len(),
+        adapters
+            .iter()
+            .map(describe_adapter)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
 }
 
 /// Runtime window icon (Windows window/taskbar, X11 alt-tab). macOS instead

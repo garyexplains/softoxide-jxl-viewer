@@ -10,6 +10,9 @@ jxl-native/target/
 .vscode/
 *.swp
 
+# Private notes
+IDEA.md
+
 # OS junk
 Thumbs.db
 .DS_Store

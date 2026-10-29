@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! jxlviewer binary entry point. Far logic lives in the library
 //! (`jxlviewer::cli`) so integration tests can exercise it.
 

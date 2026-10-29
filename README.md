@@ -132,6 +132,10 @@ cargo run --release -- info photo.jxl
 cargo run --release -- convert photo.png out.jxl --lossless --group-size 256 --modular
 ```
 
+On Windows the release binary is a GUI executable (no console is attached); the
+headless commands above still work from scripts — their stdout/stderr comes
+through when piped or redirected, and the process exit code is preserved.
+
 ## Architecture
 
 ```
@@ -152,6 +156,14 @@ third_party/  fetched libjxl checkout (not committed)
 ```
 
 Decisions worth knowing:
+- **Rendering**: Windows uses eframe's `wgpu` renderer over **Direct3D 12** — a
+  hardware adapter that can present to the window is preferred, and if none
+  exists a CPU adapter (Microsoft Basic Render Driver / WARP) is tried as a
+  best-effort software-rendering fallback *not yet verified on real
+  hardware-less machines*. macOS and Linux keep the OpenGL (`glow`) renderer.
+  The renderer is selected explicitly per platform in `run_gui`, so Cargo
+  feature unification can never silently change it; the wgpu build is pinned
+  to the Direct3D 12 backend + WGSL shader support (`wgpu/dx12`, `wgpu/wgsl`).
 - The GUI decodes JXL with **jxl-oxide + moxcms** for correct sRGB rendering (ICC/CMYK-safe).
   libjxl is used for encoding and as a decode fallback.
 - `jpegxl-rs` (the GPL-3.0 Rust wrapper for libjxl) was deliberately avoided so this project can

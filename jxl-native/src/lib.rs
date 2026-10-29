@@ -375,7 +375,7 @@ pub struct EncodeOptions {
     pub lossless: bool,
     /// VarDCT distance, 0..=25 (1.0 = "visually lossless"). Used when `!lossless`.
     pub distance: f32,
-    /// Effort 0..=10; libjxl default is 7.
+    /// Effort 0..=10; our default is 3, libjxl's own default is 7.
     pub effort: i64,
     /// Force modular mode.
     pub modular: Option<bool>,
@@ -388,7 +388,7 @@ impl Default for EncodeOptions {
         Self {
             lossless: false,
             distance: 1.0,
-            effort: 7,
+            effort: 3,
             modular: None,
             group_size: None,
         }

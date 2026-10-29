@@ -190,14 +190,14 @@ const JXL_PRESETS: &[JxlPreset] = &[
     },
     JxlPreset {
         name: "Visually lossless",
-        tip: "Distance 1.0, effort 7 (the default).\nIndistinguishable from the original at normal viewing.",
+        tip: "Distance 1.0, effort 7.\nIndistinguishable from the original at normal viewing.",
         lossless: false,
         distance: 1.0,
         effort: 7,
     },
     JxlPreset {
         name: "Visually lossless & fast",
-        tip: "Distance 1.0, effort 3 — same quality, several times faster;\na few % larger.",
+        tip: "Distance 1.0, effort 3 (the default) — same quality, several times faster;\na few % larger.",
         lossless: false,
         distance: 1.0,
         effort: 3,

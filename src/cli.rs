@@ -20,7 +20,7 @@ impl Default for ConvertOptions {
             quality: None,
             lossless: false,
             distance: 1.0,
-            effort: 7,
+            effort: 3,
             keep_alpha: None,
             modular: false,
             group_size: None,

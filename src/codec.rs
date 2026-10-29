@@ -918,7 +918,7 @@ impl Default for JxlSaveOptions {
         Self {
             lossless: false,
             distance: 1.0,
-            effort: 7,
+            effort: 3,
             keep_alpha: true,
             modular: false,
             group_size: None,

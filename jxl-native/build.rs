@@ -50,8 +50,103 @@ fn main() {
     cfg.define("JPEGXL_ENABLE_TCMALLOC", "OFF");
     cfg.define("JPEGXL_ENABLE_WASMU", "OFF");
     cfg.define("BUILD_TESTING", "OFF");
-    cfg.always_configure(env::var_os("JXL_LIBJXL_REBUILD").is_none());
 
+    // Toolchain selection (Windows only).
+    //
+    // Upstream builds the libjxl Windows release binaries with Visual
+    // Studio's ClangCL toolset (`-T ClangCL` in their release workflow).
+    // Measurements on identical sources (v0.12.0), machine and inputs show
+    // the MSVC-built encoder runs **~50x slower** (0.2 MP/s vs 15 MP/s per
+    // 12 threads on an 18 MP photo at effort 7), which is why clang-cl is
+    // preferred automatically here when LLVM is found. Override with
+    // `JXL_LIBJXL_TOOLCHAIN=msvc` (or `clang`; full path via
+    // `JXL_LIBJXL_CLANG_CL`).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Toolchain {
+        Clang,
+        Msvc,
+    }
+    let chosen = if cfg!(windows) {
+        let name = env::var("JXL_LIBJXL_TOOLCHAIN")
+            .as_deref()
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase());
+        let clang = find_clang_cl();
+        match name.as_deref() {
+            Some("msvc") => Toolchain::Msvc,
+            Some("clang") => match &clang {
+                Some(_) => Toolchain::Clang,
+                None => panic!("JXL_LIBJXL_TOOLCHAIN=clang but clang-cl.exe was not found"),
+            },
+            Some(other) => panic!("jxl-native: unknown JXL_LIBJXL_TOOLCHAIN={other} (clang|msvc)"),
+            None => {
+                if clang.is_some() {
+                    Toolchain::Clang
+                } else {
+                    Toolchain::Msvc
+                }
+            }
+        }
+    } else {
+        Toolchain::Msvc
+    };
+
+    if chosen == Toolchain::Clang {
+        let clang_cl = find_clang_cl().expect("clang-cl.exe");
+        let llvm_bin = clang_cl
+            .parent()
+            .expect("clang-cl.exe must have a parent directory")
+            .to_path_buf();
+        // Ninja honors CC/CXX; the VS generator would need a toolset
+        // (`ClangCL` requires VS's optional LLVM component, which we
+        // cannot assume is installed).
+        cfg.generator("Ninja");
+        // clang-cl needs lld-link (and friends) on PATH; CMake needs MSVC
+        // headers, which clang-cl locates itself.
+        let current_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{};{}", llvm_bin.display(), current_path);
+        // Edition 2024: env mutation requires unsafe.
+        unsafe { env::set_var("PATH", &new_path) };
+        cfg.env("PATH", &new_path);
+        // cmake's compiler detection runs in this process, so `CC`/`CXX`
+        // must also be in the real environment.
+        unsafe { env::set_var("CC", &clang_cl) };
+        unsafe { env::set_var("CXX", &clang_cl) };
+        // The crate's MSVC defaults (`/nologo -MD -Brepro -W0`) don't fly
+        // under clang-cl; use CMake's own defaults and pin the dynamic CRT
+        // the same way the MSVC build did.
+        cfg.no_default_flags(true);
+        cfg.cflag("/MD");
+        cfg.cxxflag("/MD");
+        cfg.define("CMAKE_BUILD_TYPE", "Release");
+    }
+
+    // Wipe a stale CMake cache when the generator/toolchain changed
+    // (otherwise CMake errors instead of reconfiguring in place).
+    #[cfg(windows)]
+    {
+        let build_dir_for_wipe = out_dir.join("build");
+        let out_cache = build_dir_for_wipe.join("CMakeCache.txt");
+        if out_cache.exists() {
+            if let Ok(text) = std::fs::read_to_string(&out_cache) {
+                let cached_ninja = text.contains("CMAKE_GENERATOR:INTERNAL=Ninja");
+                let cached_clang = text.contains("clang-cl");
+                let gen_changed = cached_ninja != (chosen == Toolchain::Clang);
+                let tool_changed = cached_clang != (chosen == Toolchain::Clang);
+                if gen_changed || tool_changed {
+                    eprintln!(
+                        "jxl-native: toolchain changed, wiping CMake cache in {}",
+                        build_dir_for_wipe.display()
+                    );
+                    if let Err(e) = std::fs::remove_dir_all(&build_dir_for_wipe) {
+                        eprintln!("jxl-native: cache wipe failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    cfg.always_configure(env::var_os("JXL_LIBJXL_REBUILD").is_none());
     let dst = cfg.build();
 
     // Locate all the static libraries we may need. libjxl's install tree is
@@ -161,3 +256,51 @@ fn split_name(file: &str) -> (String, String) {
 
 #[allow(dead_code)] // vendored path doc for future contributors
 fn unused_markers(_: &Path) {}
+
+/// Locates a clang-cl.exe: `JXL_LIBJXL_CLANG_CL` override, LLVM's standard
+/// install location, or Visual Studio's bundled LLVM component.
+#[cfg(windows)]
+fn find_clang_cl() -> Option<PathBuf> {
+    if let Some(p) = env::var_os("JXL_LIBJXL_CLANG_CL") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let pf: PathBuf = env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+
+    // Standalone LLVM install.
+    let llvm = pf.join("LLVM").join("bin").join("clang-cl.exe");
+    if llvm.is_file() {
+        return Some(llvm);
+    }
+
+    // Visual Studio's optional LLVM toolset component.
+    let vs_root = pf.join("Microsoft Visual Studio");
+    if vs_root.is_dir() {
+        for year in ["2022", "2019"] {
+            for edition in ["Community", "Professional", "Enterprise", "BuildTools"] {
+                let candidate = vs_root
+                    .join(year)
+                    .join(edition)
+                    .join("VC")
+                    .join("Tools")
+                    .join("Llvm")
+                    .join("x64")
+                    .join("bin")
+                    .join("clang-cl.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_clang_cl() -> Option<PathBuf> {
+    None
+}

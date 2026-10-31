@@ -123,6 +123,22 @@ cargo run --release --example gen_icon
   (Window/taskbar icons also work on X11 without a desktop entry; Wayland
   requires it.)
 
+### Windows file associations (double-click integration)
+
+The viewer can register itself as the program Windows uses to open image files:
+
+- **GUI** — the gear icon at the end of the toolbar opens a dialog listing every
+  supported type (`.jxl`, `.png`, `.jpg`, `.gif`, `.bmp`, `.tiff`, `.webp`,
+  `.pn*` …); toggling a checkbox registers or removes that association at once.
+- **CLI** — `jxlviewer register [EXTS…]` (default: `jxl`; `--all` for every
+  supported type), `jxlviewer unregister [EXTS…]`, and `jxlviewer registered`
+  to list current associations.
+
+Registration is per-user (HKCU registry, no admin rights). When another app is
+already the default handler for a type, the viewer is added to its "Open with…"
+list instead of silently stealing the default; Windows then offers it through
+right-click ▸ Open with / Settings ▸ Default apps.
+
 ## Running
 
 ```sh

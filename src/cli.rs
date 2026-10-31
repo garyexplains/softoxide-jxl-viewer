@@ -1,4 +1,4 @@
-//! Headless CLI: `info`, `convert`, help text.
+//! Headless CLI: `info`, `convert`, `register`/`unregister` (Windows), help text.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,10 @@ pub const MAIN_HELP: &str = "jxlviewer — SoftOxide JXL Viewer (native JPEG XL 
  Usage:\n  jxlviewer [FILE]              open the GUI (optionally with FILE)\n\
    jxlviewer info FILE…          print file metadata\n\
    jxlviewer convert IN OUT …    headless conversion\n\
+   jxlviewer register [EXTS…]    register Windows file associations (default: jxl;\n\
+     \x20                           \"--all\" for every supported type; Windows only)\n\
+   jxlviewer unregister [EXTS…]  remove Windows file associations\n\
+   jxlviewer registered          list extensions currently registered (Windows only)\n\
    jxlviewer --version\n";
 
 pub fn run(args: Vec<String>) -> i32 {
@@ -78,6 +82,25 @@ pub fn run(args: Vec<String>) -> i32 {
             print!("{MAIN_HELP}\n\n{CONVERT_HELP}\n");
             0
         }
+        Some("register") => assoc_cli("register", &args[1..]),
+        Some("unregister") => assoc_cli("unregister", &args[1..]),
+        Some("registered") => {
+            if !args[1..].is_empty() {
+                eprintln!("error: 'registered' takes no arguments\n{MAIN_HELP}");
+                2
+            } else {
+                let registered = crate::assoc::registered_extensions();
+                if registered.is_empty() {
+                    println!("no file associations registered");
+                } else {
+                    for ext in registered {
+                        let desc = crate::assoc::format_for(ext).map(|f| f.desc).unwrap_or("");
+                        println!(".{ext}  SoftOxide JXL Viewer ({desc})");
+                    }
+                }
+                0
+            }
+        }
         Some("--version" | "-V") => {
             println!("jxlviewer {}", env!("CARGO_PKG_VERSION"));
             0
@@ -92,6 +115,58 @@ pub fn run(args: Vec<String>) -> i32 {
             2
         }
     }
+}
+
+/// Windows file-association commands: `register`/`unregister [EXTS…|--all]`.
+/// Without arguments, registers/removes the viewer's primary type (`.jxl`).
+fn assoc_cli(op: &str, args: &[String]) -> i32 {
+    let valid: Vec<String> = crate::assoc::FORMATS
+        .iter()
+        .map(|f| f.ext.to_string())
+        .collect();
+    let all = args.iter().any(|a| a == "--all");
+    if all && args.iter().any(|a| a != "--all") {
+        eprintln!("error: \"--all\" cannot be combined with explicit extensions");
+        return 2;
+    }
+    let mut exts: Vec<String> = Vec::new();
+    if all {
+        exts.extend(valid.iter().cloned());
+    } else {
+        for a in args {
+            let ext = a.trim_start_matches('.').to_ascii_lowercase();
+            if !valid.iter().any(|v| *v == ext) {
+                eprintln!(
+                    "error: unknown file type '{a}'\nsupported types: {} (or \"--all\")",
+                    valid.join(", ")
+                );
+                return 2;
+            }
+            if !exts.contains(&ext) {
+                exts.push(ext);
+            }
+        }
+        if exts.is_empty() {
+            exts.push(crate::assoc::DEFAULT_EXT.to_string());
+        }
+    }
+
+    let mut code = 0;
+    for ext in &exts {
+        let result = if op == "register" {
+            crate::assoc::register(ext)
+        } else {
+            crate::assoc::unregister(ext)
+        };
+        match result {
+            Ok(msg) => println!(".{ext}: {msg}"),
+            Err(e) => {
+                eprintln!("error: .{ext}: {e}");
+                code = 1;
+            }
+        }
+    }
+    code
 }
 
 pub fn info_cmd(path: &Path) -> Result<String, String> {

@@ -33,6 +33,7 @@ pub const PAUSE: &str = "\u{E39E}";
 pub const SKIP_BACK: &str = "\u{E5A4}";
 pub const SKIP_FORWARD: &str = "\u{E5A6}";
 pub const FILM_STRIP: &str = "\u{E792}";
+pub const GEAR: &str = "\u{E270}";
 
 /// Registers the vendored Phosphor font as a proportional-text fallback.
 pub fn add_to_fonts(fonts: &mut eframe::egui::FontDefinitions) {

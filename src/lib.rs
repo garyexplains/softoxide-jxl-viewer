@@ -1,6 +1,7 @@
 //! jxlviewer library: viewer app, codecs, and CLI command implementations.
 
 pub mod app;
+pub mod assoc;
 pub mod cli;
 pub mod codec;
 pub mod dialogs;

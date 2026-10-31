@@ -103,6 +103,11 @@ pub struct App {
     pub(crate) save_dialog: Option<SaveDialogState>,
     pub(crate) resize_dialog: Option<ResizeDialogState>,
 
+    /// Windows file-associations dialog (toolbar gear icon).
+    pub(crate) assoc_open: bool,
+    pub(crate) assoc_rows: Vec<AssocRow>,
+    pub(crate) assoc_msg: Option<(bool, String)>,
+
     pub(crate) busy: Option<String>,
     /// When the current save job started, for the elapsed-seconds readout.
     pub(crate) busy_started: Option<std::time::Instant>,
@@ -124,6 +129,13 @@ pub struct App {
 
 const UNDO_LIMIT: usize = 5;
 
+/// One row of the Windows file-associations dialog.
+pub(crate) struct AssocRow {
+    pub ext: String,
+    pub desc: String,
+    pub registered: bool,
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> App {
         // Icon font (vendored Phosphor) as a fallback for UI glyphs.
@@ -142,6 +154,9 @@ impl App {
             crop_rect: None,
             save_dialog: None,
             resize_dialog: None,
+            assoc_open: false,
+            assoc_rows: Vec::new(),
+            assoc_msg: None,
             busy: None,
             busy_started: None,
             task_rx: None,
@@ -1086,7 +1101,34 @@ impl App {
             {
                 self.set_view_zoom(Some(1.0), ctx);
             }
+
+            // Windows-only: per-user file associations (gear icon at the end).
+            #[cfg(windows)]
+            if ui
+                .button(format!("{}", icons::GEAR))
+                .on_hover_text("File associations…")
+                .clicked()
+            {
+                self.assoc_open = !self.assoc_open;
+                if self.assoc_open {
+                    self.reload_assoc_rows();
+                    self.assoc_msg = None;
+                }
+            }
         });
+    }
+
+    /// Re-reads the registry state for the associations dialog.
+    #[cfg(windows)]
+    fn reload_assoc_rows(&mut self) {
+        self.assoc_rows = crate::assoc::FORMATS
+            .iter()
+            .map(|f| AssocRow {
+                ext: f.ext.to_string(),
+                desc: f.desc.to_string(),
+                registered: crate::assoc::is_registered(f.ext),
+            })
+            .collect();
     }
 
     fn pick_open_file(&mut self) {
@@ -1256,6 +1298,8 @@ impl App {
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         crate::dialogs::show_save_dialog(ctx, self);
         crate::dialogs::show_resize_dialog(ctx, self);
+        #[cfg(windows)]
+        crate::dialogs::show_associations_dialog(ctx, self);
         self.show_crop_bar(ctx);
     }
 

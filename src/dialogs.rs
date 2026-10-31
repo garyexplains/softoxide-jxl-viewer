@@ -1,5 +1,5 @@
-//! Dialog windows: Save-as (per-format options incl. JXL lossless/tiles) and
-//! Resize. Both operate directly on `&mut App` and dispatch worker-thread jobs.
+//! Dialog windows: Save-as (per-format options incl. JXL lossless/tiles),
+//! Resize, and (Windows) file associations. All operate directly on `&mut App`.
 
 use eframe::egui;
 use egui::Align2;
@@ -433,5 +433,113 @@ pub fn show_resize_dialog(ctx: &egui::Context, app: &mut App) {
         app.resize_dialog = None;
     } else {
         app.resize_dialog = Some(d);
+    }
+}
+
+/// Windows-only: per-user file-type registration (toolbar gear icon). Toggling
+/// a checkbox applies the change to the registry immediately and reconciles
+/// the row state with what the registry actually contains.
+#[cfg(windows)]
+pub fn show_associations_dialog(ctx: &egui::Context, app: &mut App) {
+    use crate::assoc;
+
+    if !app.assoc_open {
+        return;
+    }
+    let mut open = true;
+
+    egui::Window::new(format!("{}  File associations", icons::GEAR))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::RIGHT_TOP, [-8.0, 0.0])
+        .show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Register SoftOxide JXL Viewer as the program Windows uses to open these \
+                         file types. Applies to the current user only (registry, no admin rights).",
+                    )
+                    .weak(),
+                );
+            });
+            ui.add_space(2.0);
+
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("assoc_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 3.0])
+                        .show(ui, |ui| {
+                            for row in &mut app.assoc_rows {
+                                let mut checked = row.registered;
+                                ui.checkbox(&mut checked, format!(".{}", row.ext))
+                                    .on_hover_text(row.desc.clone());
+                                // Toggle applies immediately; the registry result
+                                // decides the displayed state (revert on failure).
+                                if checked != row.registered {
+                                    let result = if checked {
+                                        assoc::register(&row.ext)
+                                    } else {
+                                        assoc::unregister(&row.ext)
+                                    };
+                                    row.registered = assoc::is_registered(&row.ext);
+                                    app.assoc_msg = Some(match result {
+                                        Ok(msg) => (true, format!(".{}: {}", row.ext, msg)),
+                                        Err(err) => (false, format!(".{}: {err}", row.ext)),
+                                    });
+                                }
+                                ui.label(egui::RichText::new(row.desc.clone()).weak());
+                                ui.end_row();
+                            }
+                        });
+                });
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if let Some((ok, msg)) = &app.assoc_msg {
+                    let (icon, color) = if *ok {
+                        (icons::CHECK_CIRCLE, egui::Color32::from_rgb(120, 220, 140))
+                    } else {
+                        (
+                            icons::WARNING_CIRCLE,
+                            egui::Color32::from_rgb(255, 130, 130),
+                        )
+                    };
+                    ui.label(egui::RichText::new(format!("{icon}  {msg}")).color(color));
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Checked types are ready for double-click. If another app is still \
+                             the default, use right-click > Open with to switch, or Windows \
+                             Settings > Default apps.",
+                        )
+                        .weak(),
+                    );
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| match assoc::viewer_exe() {
+                Ok(exe) => {
+                    ui.label(
+                        egui::RichText::new(format!("Points at: {exe}"))
+                            .weak()
+                            .small(),
+                    );
+                }
+                Err(e) => {
+                    ui.label(
+                        egui::RichText::new(e)
+                            .weak()
+                            .small()
+                            .color(egui::Color32::RED),
+                    );
+                }
+            });
+        });
+
+    if !open {
+        app.assoc_open = false;
     }
 }

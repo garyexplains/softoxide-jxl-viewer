@@ -1972,6 +1972,7 @@ dependencies = [
  "png",
  "rfd",
  "wgpu",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

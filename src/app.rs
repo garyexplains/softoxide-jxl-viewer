@@ -10,6 +10,7 @@ use egui::{
 };
 
 use crate::codec::{self, JpegSaveOptions, JxlSaveOptions, SaveOptions};
+use crate::folder::{FolderState, SortKey};
 use crate::icons;
 use crate::raster::{Raster, RasterRect, ResizeFilter};
 
@@ -17,6 +18,13 @@ use crate::raster::{Raster, RasterRect, ResizeFilter};
 pub enum Tool {
     Pan,
     Crop,
+}
+
+/// What the central panel shows: the image canvas or the folder grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Single,
+    Folder,
 }
 
 #[derive(Clone)]
@@ -103,6 +111,21 @@ pub struct App {
     pub(crate) save_dialog: Option<SaveDialogState>,
     pub(crate) resize_dialog: Option<ResizeDialogState>,
 
+    /// Central-panel mode: image canvas or folder grid. `Folder` requires
+    /// `folder` to be `Some` (a grid with no scan result shows empty).
+    pub(crate) mode: ViewMode,
+    /// Folder-grid state (kept alive after opening an image, so ESC back is
+    /// instant and thumbnails survive).
+    pub(crate) folder: Option<FolderState>,
+    /// Pending directory scan (worker thread → UI): (root, entries, switch).
+    pub(crate) scan_rx:
+        Option<Receiver<(PathBuf, Vec<(PathBuf, Option<std::time::SystemTime>)>, bool)>>,
+
+    /// Folder-grid viewing preferences (session-level, survive folder
+    /// switches and rescans).
+    pub(crate) grid_sort: (SortKey, bool),
+    pub(crate) grid_thumb_size: f32,
+
     /// Windows file-associations dialog (toolbar gear icon).
     pub(crate) assoc_open: bool,
     pub(crate) assoc_rows: Vec<AssocRow>,
@@ -154,6 +177,11 @@ impl App {
             crop_rect: None,
             save_dialog: None,
             resize_dialog: None,
+            mode: ViewMode::Single,
+            folder: None,
+            scan_rx: None,
+            grid_sort: (SortKey::Name, false),
+            grid_thumb_size: crate::folder::DEFAULT_THUMB_SIZE,
             assoc_open: false,
             assoc_rows: Vec::new(),
             assoc_msg: None,
@@ -174,7 +202,11 @@ impl App {
     }
 
     pub fn open_on_startup(&mut self, path: PathBuf) {
-        self.pending_open = Some(path);
+        if path.is_dir() {
+            self.open_folder_at(path, true);
+        } else {
+            self.pending_open = Some(path);
+        }
     }
 
     // ---- editing -----------------------------------------------------------
@@ -282,6 +314,67 @@ impl App {
         self.open_path(path);
     }
 
+    /// Opens the folder grid: scans `dir` on a worker thread. When `switch`
+    /// is set, the grid replaces the canvas as soon as the listing arrives;
+    /// otherwise the scan only (re)builds the grid state in the background so
+    /// a later ESC is instant (the viewer stays on the image).
+    pub(crate) fn open_folder_at(&mut self, dir: PathBuf, switch: bool) {
+        // One scan at a time; the latest request wins (older result ignored).
+        if self.scan_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        if switch {
+            self.status = format!("Opening folder {}…", file_name(&dir));
+        }
+        std::thread::spawn(move || {
+            let files = crate::folder::scan(&dir);
+            let _ = tx.send((dir, files, switch));
+        });
+    }
+
+    fn poll_folder_scan(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.scan_rx.take() {
+            match rx.try_recv() {
+                Ok((root, files, switch)) => {
+                    let n = files.len();
+                    // Preselect the currently open file, if it's in the list.
+                    let selected = self
+                        .doc
+                        .as_ref()
+                        .and_then(|d| d.path.as_ref())
+                        .and_then(|p| files.iter().position(|(f, _)| path_key(f) == path_key(p)))
+                        .unwrap_or(0);
+                    let root_name = file_name(&root);
+                    let (sort_key, sort_desc) = self.grid_sort;
+                    self.folder = Some(FolderState::new(
+                        root,
+                        files,
+                        sort_key,
+                        sort_desc,
+                        self.grid_thumb_size,
+                    ));
+                    if let Some(f) = &mut self.folder {
+                        f.selected = selected;
+                        f.scroll_to = Some(selected);
+                    }
+                    if switch {
+                        self.mode = ViewMode::Folder;
+                        self.status = format!("{} images in {root_name}", n);
+                    }
+                    ctx.request_repaint();
+                }
+                Err(_) => {
+                    // Scan still running: put the receiver back and retry next
+                    // frame.
+                    self.scan_rx = Some(rx);
+                    ctx.request_repaint_after(std::time::Duration::from_millis(60));
+                }
+            }
+        }
+    }
+
     pub(crate) fn open_path(&mut self, path: PathBuf) {
         // Strict lockout: covers Open, drag-&-drop, and folder navigation.
         if self.busy.is_some() {
@@ -289,6 +382,9 @@ impl App {
         }
         match codec::decode_file(&path) {
             Ok(img) => {
+                // Opening a file always shows the canvas — e.g. when the user
+                // picks Open… while the folder grid is up.
+                self.mode = ViewMode::Single;
                 let w = img.raster.width;
                 let h = img.raster.height;
                 self.doc = Some(Document {
@@ -344,6 +440,18 @@ impl App {
                     },
                     [hdr_note, anim_note].concat(),
                 );
+                // Eagerly prepare the folder grid for this image's folder (in
+                // the background, silently) so ESC is instant even when the
+                // image came from a different folder than the grid shows.
+                if let Some(dir) = path.parent().map(|p| p.to_path_buf()) {
+                    let same_root = self
+                        .folder
+                        .as_ref()
+                        .is_some_and(|f| path_key(&f.root) == path_key(&dir));
+                    if !same_root {
+                        self.open_folder_at(dir, false);
+                    }
+                }
             }
             Err(e) => self.error = Some(e),
         }
@@ -458,6 +566,25 @@ fn path_key(p: &Path) -> String {
     p.to_string_lossy().to_lowercase()
 }
 
+/// File name for display.
+fn name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Truncates with an ellipsis so the label fits `max_width` points (rough:
+/// assumes ~7.0 points per char at the small font).
+fn elide(name: &str, max_width: f32) -> String {
+    let max_chars = ((max_width / 7.0).floor() as usize).max(4);
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let head: String = name.chars().take(keep).collect();
+    format!("{head}…")
+}
+
 fn build_checker_texture(ctx: &egui::Context) -> TextureHandle {
     let mut px = Vec::with_capacity(16 * 16 * 4);
     let (c0, c1) = ([46u8, 46, 50, 255], [58u8, 58, 64, 255]);
@@ -482,6 +609,7 @@ impl eframe::App for App {
     /// Non-UI work: message pump, queued/dropped opens.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_messages(ctx);
+        self.poll_folder_scan(ctx);
 
         if let Some(path) = self.pending_open.take() {
             self.open_explicit(path);
@@ -508,8 +636,21 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
-        self.tick_animation(&ctx);
-        self.refresh_texture(&ctx);
+        if self.mode == ViewMode::Single {
+            // Animation frames advance only while the canvas is visible.
+            self.tick_animation(&ctx);
+        }
+        if self.mode == ViewMode::Single {
+            self.refresh_texture(&ctx);
+        } else if let Some(folder) = &mut self.folder {
+            folder.poll_thumbs(&ctx, |path, raster| {
+                ctx.load_texture(
+                    format!("thumb-{}", path.display()),
+                    raster.to_color_image(),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        }
 
         egui::Panel::top("toolbar")
             .resizable(false)
@@ -519,7 +660,10 @@ impl eframe::App for App {
             .resizable(false)
             .show(ui, |ui| self.show_statusbar(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| self.show_canvas(ui, &ctx));
+        egui::CentralPanel::default().show(ui, |ui| match self.mode {
+            ViewMode::Folder => self.show_folder_grid(ui, &ctx),
+            ViewMode::Single => self.show_canvas(ui, &ctx),
+        });
 
         self.show_dialogs(&ctx);
         self.update_window_title(&ctx);
@@ -621,6 +765,13 @@ impl App {
                 ctx.request_repaint();
                 return;
             }
+            // Back out to the folder grid when one is active (and we're not
+            // already looking at it).
+            if self.folder.is_some() && self.mode == ViewMode::Single {
+                self.return_to_folder();
+                ctx.request_repaint();
+                return;
+            }
         }
 
         // While a modal-ish dialog is up, other shortcuts are ignored.
@@ -651,6 +802,10 @@ impl App {
         }
 
         // ---- file ------------------------------------------------------------
+        if ctrl && shift && pressed(Key::O) && !locked {
+            self.pick_open_folder();
+            return;
+        }
         if ctrl && pressed(Key::O) && !locked {
             self.pick_open_file();
             return;
@@ -697,6 +852,56 @@ impl App {
                 self.anim_step(-1, ctx);
                 return;
             }
+        }
+
+        // ---- folder-grid mode -------------------------------------------------
+        // In grid mode, arrows move the selection, Enter/double-click opens,
+        // and the image-editing shortcuts don't apply.
+        if self.mode == ViewMode::Folder {
+            let Some(folder) = &mut self.folder else {
+                return;
+            };
+            if folder.files.is_empty() {
+                return;
+            }
+            let n = folder.files.len();
+            let cols = folder.columns.max(1);
+            let mut sel = folder.selected;
+            let mut new_size: Option<f32> = None;
+            if plain && pressed(Key::ArrowRight) {
+                sel = (sel + 1).min(n - 1);
+            } else if plain && pressed(Key::ArrowLeft) {
+                sel = sel.saturating_sub(1);
+            } else if plain && pressed(Key::ArrowDown) {
+                sel = (sel + cols).min(n - 1);
+            } else if plain && pressed(Key::ArrowUp) {
+                sel = sel.saturating_sub(cols);
+            } else if plain && pressed(Key::Home) {
+                sel = 0;
+            } else if plain && pressed(Key::End) {
+                sel = n - 1;
+            } else if plain && pressed(Key::Enter) {
+                let path = folder.files[folder.selected].clone();
+                self.open_path(path);
+                self.mode = ViewMode::Single;
+                ctx.request_repaint();
+                return;
+            } else if plain && (pressed(Key::Plus) || pressed(Key::Equals)) {
+                folder.set_thumb_size(folder.thumb_size + 32.0);
+                new_size = Some(folder.thumb_size);
+            } else if plain && pressed(Key::Minus) {
+                folder.set_thumb_size(folder.thumb_size - 32.0);
+                new_size = Some(folder.thumb_size);
+            } else {
+                return;
+            }
+            folder.selected = sel;
+            folder.scroll_to = Some(sel);
+            if let Some(s) = new_size {
+                self.grid_thumb_size = s;
+            }
+            ctx.request_repaint();
+            return;
         }
 
         // ---- edits (need an image) ------------------------------------------
@@ -871,6 +1076,18 @@ impl App {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
+        if self.mode == ViewMode::Folder {
+            let title = match &self.folder {
+                Some(f) => format!(
+                    "SoftOxide JXL Viewer — {} ({} images)",
+                    file_name(&f.root),
+                    f.files.len()
+                ),
+                None => "SoftOxide JXL Viewer — folder".to_string(),
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            return;
+        }
         let title = match &self.doc {
             Some(doc) => {
                 let name = doc
@@ -907,6 +1124,18 @@ impl App {
                 .clicked()
             {
                 self.pick_open_file();
+            }
+            if ui
+                .add_enabled(
+                    !locked,
+                    egui::Button::new(format!("{}  Folder…", icons::FOLDER_OPEN)),
+                )
+                .on_hover_text(
+                    "Open a folder as a thumbnail grid (Ctrl+Shift+O); Esc returns from an image",
+                )
+                .clicked()
+            {
+                self.pick_open_folder();
             }
             ui.separator();
 
@@ -1131,6 +1360,41 @@ impl App {
             .collect();
     }
 
+    /// ESC from the image canvas back to the folder grid: selection jumps to
+    /// the image being viewed.
+    fn return_to_folder(&mut self) {
+        let doc_dir = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.path.as_ref())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+        match (&self.folder, doc_dir) {
+            (Some(_), None) => {
+                // Untitled document: show whatever grid we have.
+                self.mode = ViewMode::Folder;
+            }
+            (Some(f), Some(dir)) if path_key(&f.root) == path_key(&dir) => {
+                // Same folder: instant, thumbnails still cached.
+                let folder = self.folder.as_mut().unwrap();
+                folder.selected = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.path.as_ref())
+                    .and_then(|p| folder.files.iter().position(|f| path_key(f) == path_key(p)))
+                    .unwrap_or(folder.selected);
+                folder.scroll_to = Some(folder.selected);
+                self.mode = ViewMode::Folder;
+            }
+            (_, Some(dir)) => {
+                // Different folder (or no grid yet): rescan in the background
+                // and swap the grid in when the listing lands.
+                self.open_folder_at(dir, true);
+            }
+            (None, None) => {}
+        }
+    }
+
     fn pick_open_file(&mut self) {
         if self.busy.is_some() {
             return; // strict lockout
@@ -1148,6 +1412,19 @@ impl App {
         );
         if let Some(path) = dialog.pick_file() {
             self.open_explicit(path);
+        }
+    }
+
+    fn pick_open_folder(&mut self) {
+        if self.scan_rx.is_some() {
+            return; // a scan is already running
+        }
+        let mut dialog = rfd::FileDialog::new().set_title("Open folder");
+        if let Some(dir) = &self.last_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.open_folder_at(dir, true);
         }
     }
 
@@ -1253,10 +1530,262 @@ impl App {
         }
     }
 
+    // ---- folder grid -------------------------------------------------------
+
+    /// Central-panel folder view: grid of thumbnails, double-click opens.
+    fn show_folder_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(folder) = &mut self.folder else {
+            ui.centered_and_justified(|ui| {
+                ui.label("No folder open — use Open folder… (Ctrl+Shift+O)");
+            });
+            return;
+        };
+
+        let mut open_idx: Option<usize> = None;
+        // Preference changes made in the header; synced to App prefs after
+        // the folder borrow ends.
+        let mut pref_sort: Option<(SortKey, bool)> = None;
+        let mut pref_size: Option<f32> = None;
+
+        // ---- grid header: sort + thumbnail size ---------------------------
+        {
+            ui.horizontal(|ui| {
+                ui.label("Sort:");
+                let mut key = folder.sort_key;
+                egui::ComboBox::from_id_salt("grid_sort")
+                    .selected_text(key.label())
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        let keys = [(SortKey::Name, "Name"), (SortKey::Date, "Date modified")];
+                        for (k, label) in keys {
+                            ui.selectable_value(&mut key, k, label);
+                        }
+                    });
+                if key != folder.sort_key {
+                    pref_sort = Some((key, folder.sort_desc));
+                    folder.set_sort(key, folder.sort_desc);
+                }
+
+                let dir_icon = if folder.sort_desc {
+                    icons::ARROW_UP
+                } else {
+                    icons::ARROW_DOWN
+                };
+                let dir_text = if folder.sort_desc {
+                    "descending"
+                } else {
+                    "ascending"
+                };
+                if ui
+                    .button(dir_icon)
+                    .on_hover_text(format!("Toggle order (currently {dir_text})"))
+                    .clicked()
+                {
+                    let desc = !folder.sort_desc;
+                    pref_sort = Some((folder.sort_key, desc));
+                    folder.set_sort(folder.sort_key, desc);
+                }
+
+                ui.separator();
+                ui.label("Size:");
+                let mut size = folder.thumb_size;
+                let slider = ui.add_sized(
+                    [150.0, 18.0],
+                    egui::Slider::new(
+                        &mut size,
+                        crate::folder::MIN_THUMB_SIZE..=crate::folder::MAX_THUMB_SIZE,
+                    )
+                    .step_by(32.0)
+                    .show_value(false),
+                );
+                if size != folder.thumb_size {
+                    folder.set_thumb_size(size);
+                    pref_size = Some(folder.thumb_size);
+                }
+                let _ = slider;
+                ui.label(egui::RichText::new(format!("{} px", folder.thumb_size)).weak());
+            });
+            ui.separator();
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let cell = folder.thumb_size;
+                let label_h = 18.0;
+                let pad = 10.0;
+                let cell_w = cell + pad * 2.0;
+                let cell_h = cell + label_h + pad * 2.0;
+                let cols = ((ui.available_width() / cell_w).floor() as usize).clamp(1, 64);
+                folder.columns = cols;
+
+                let n = folder.files.len();
+                if n == 0 {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("This folder contains no supported images.");
+                    });
+                    return;
+                }
+
+                let scroll_to = folder.scroll_to.take();
+
+                for row_start in (0..n).step_by(cols) {
+                    let row_end = (row_start + cols).min(n);
+                    ui.horizontal(|ui| {
+                        for idx in row_start..row_end {
+                            let path = folder.files[idx].clone();
+                            let selected = folder.selected == idx;
+
+                            let (rect, resp) =
+                                ui.allocate_exact_size(egui::vec2(cell_w, cell_h), Sense::click());
+                            let painter = ui.painter_at(rect);
+                            let bg = if selected {
+                                Color32::from_rgb(52, 62, 92)
+                            } else if resp.hovered() {
+                                Color32::from_rgb(46, 46, 52)
+                            } else {
+                                Color32::from_rgb(38, 38, 44)
+                            };
+                            painter.rect_filled(rect, 6.0, bg);
+                            if selected {
+                                painter.rect_stroke(
+                                    rect,
+                                    6.0,
+                                    egui::Stroke::new(2.0, Color32::from_rgb(120, 160, 255)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+
+                            // Thumb area.
+                            let inner = egui::Rect::from_min_size(
+                                rect.min + egui::vec2(pad, pad),
+                                egui::vec2(cell, cell),
+                            );
+                            let tex = folder.thumb(&path);
+                            match tex {
+                                Some(t) => {
+                                    let size = t.size_vec2();
+                                    let scale =
+                                        (inner.width() / size.x).min(inner.height() / size.y);
+                                    let shown = size * scale;
+                                    let img_rect = egui::Rect::from_min_size(
+                                        inner.center() - shown / 2.0,
+                                        shown,
+                                    );
+                                    painter.image(
+                                        t.id(),
+                                        img_rect,
+                                        Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        Color32::WHITE,
+                                    );
+                                }
+                                None => {
+                                    if folder.needs_thumb(&path) {
+                                        folder.request_thumb(path.clone());
+                                    }
+                                    painter.text(
+                                        inner.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        format!("{}  …", icons::IMAGE),
+                                        egui::FontId::proportional(20.0),
+                                        Color32::GRAY,
+                                    );
+                                }
+                            }
+
+                            // Filename label (elided to the cell width).
+                            let name = name_of(&path);
+                            painter.text(
+                                egui::pos2(rect.center().x, rect.max.y - pad - label_h / 2.0),
+                                egui::Align2::CENTER_CENTER,
+                                elide(&name, cell_w - pad),
+                                egui::FontId::proportional(11.0),
+                                if selected {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::LIGHT_GRAY
+                                },
+                            );
+
+                            if resp.clicked() {
+                                folder.selected = idx;
+                            }
+                            if resp.double_clicked() {
+                                open_idx = Some(idx);
+                            }
+                            if let Some(target) = scroll_to {
+                                if target == idx {
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Drain finished thumbnails (installs textures, requests repaint).
+                let ctx2 = ctx.clone();
+                folder.poll_thumbs(&ctx2, |path, raster| {
+                    ctx.load_texture(
+                        format!("thumb-{}", path.display()),
+                        raster.to_color_image(),
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+            });
+
+        // Sync header-made preference changes into the session prefs (the
+        // folder borrow ended with the ScrollArea above).
+        if let Some((k, d)) = pref_sort {
+            self.grid_sort = (k, d);
+        }
+        if let Some(s) = pref_size {
+            self.grid_thumb_size = s;
+        }
+
+        // Open after the ScrollArea closure is done (folder borrow released).
+        if let Some(idx) = open_idx {
+            let Some(folder) = &mut self.folder else {
+                return;
+            };
+            let path = folder.files[idx].clone();
+            folder.selected = idx;
+            self.open_path(path);
+            self.mode = ViewMode::Single;
+            ctx.request_repaint();
+        }
+    }
+
     // ---- status ------------------------------------------------------------
 
     fn show_statusbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if self.mode == ViewMode::Folder {
+                let folder_info = self.folder.as_ref().map(|f| {
+                    format!(
+                        "{} images — {}{}",
+                        f.files.len(),
+                        f.root.display(),
+                        if f.selected < f.files.len() {
+                            format!(
+                                " · {}/{} {}",
+                                f.selected + 1,
+                                f.files.len(),
+                                file_name(&f.files[f.selected])
+                            )
+                        } else {
+                            String::new()
+                        }
+                    )
+                });
+                if let Some(info) = folder_info {
+                    ui.label(info);
+                }
+                ui.label(&self.status);
+                return;
+            }
             if let Some(doc) = &self.doc {
                 ui.label(format!(
                     "{} × {} px, {}-bit, alpha {}{}",

@@ -11,6 +11,12 @@ views. It runs unchanged on Windows, macOS and Linux.
 
 ### Viewing
 - Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF, WebP, PNM.
+- **Folder grid**: "Folder…" (Ctrl+Shift+O) shows every supported image in a folder as a
+  thumbnail grid (lazy-loading, off-thread decode, memory-budgeted LRU cache). The grid
+  header sorts by **name or date** (ascending/descending toggle) and adjusts the
+  **thumbnail size** (slider 96–512 px, or `+`/`−` keys). Double-click (or Enter)
+  opens an image; **Esc** returns to the grid at the same spot. `jxlviewer <FOLDER>` opens
+  a folder directly.
 - **Animation playback** for animated JXL: all keyframes are decoded, played in a loop at the
   authored frame rate, with play/pause (`Space`), frame stepping (`,` / `.`) and a frame
   counter in the toolbar. Editing an animation flattens it to a still (the edited frame);

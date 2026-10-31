@@ -5,6 +5,7 @@ pub mod assoc;
 pub mod cli;
 pub mod codec;
 pub mod dialogs;
+pub mod folder;
 pub mod hdr;
 pub mod icons;
 pub mod nav;

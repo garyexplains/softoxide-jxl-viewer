@@ -519,7 +519,7 @@ fn srgb_display_target(image: &jxl_oxide::JxlImage) -> jxl_oxide::EnumColourEnco
 }
 
 fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
-    use jxl_oxide::{EnumColourEncoding, JxlImage, RenderingIntent};
+    use jxl_oxide::JxlImage;
 
     let mut image = JxlImage::builder()
         .read(Cursor::new(bytes))
@@ -583,7 +583,7 @@ const MAX_ANIM_FRAMES: usize = 256;
 
 /// Decodes every animation keyframe (coalesced, sRGB) with jxl-oxide.
 fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
-    use jxl_oxide::{EnumColourEncoding, JxlImage, RenderingIntent};
+    use jxl_oxide::JxlImage;
 
     let mut image = JxlImage::builder()
         .read(Cursor::new(bytes))

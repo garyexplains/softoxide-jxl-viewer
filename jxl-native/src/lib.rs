@@ -582,6 +582,14 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
         push_input_bit_depth(settings, enc, bits)?;
 
         if options.lossless {
+            // Match cjxl's setup sequence: set distance to zero first (this
+            // also sets the encoder's distance-related params), then mark the
+            // frame mathematically lossless.
+            enc_status(
+                unsafe { ffi::JxlEncoderSetFrameDistance(settings, 0.0) },
+                enc,
+                "JxlEncoderSetFrameDistance(lossless)",
+            )?;
             enc_status(
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
                 enc,
@@ -835,6 +843,11 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
         let anim_bits: u32 = if is_u16 { 16 } else { 8 };
         push_input_bit_depth(settings, enc, anim_bits)?;
         if options.lossless {
+            enc_status(
+                unsafe { ffi::JxlEncoderSetFrameDistance(settings, 0.0) },
+                enc,
+                "JxlEncoderSetFrameDistance(lossless anim)",
+            )?;
             enc_status(
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
                 enc,

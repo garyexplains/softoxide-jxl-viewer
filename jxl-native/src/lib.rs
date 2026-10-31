@@ -165,8 +165,12 @@ pub mod ffi {
     pub const JXL_ENC_FRAME_SETTING_MODULAR: c_int = 11;
     /// -1 = encoding default, 0..3 = 128/256/512/1024
     pub const JXL_ENC_FRAME_SETTING_MODULAR_GROUP_SIZE: c_int = 26;
-    /// Explicit color transform: -1 default (XYB), 0 XYB, 1 YCbCr, 2 none.
+    /// Explicit color transform: -1 default (XYB), 0 XYB, 1 none, 2 YCbCr
+    /// (mirrors the C++ `ColorTransform` enum: kXYB=0, kNone=1, kYCbCr=2).
     pub const JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM: c_int = 24;
+
+    pub const JXL_BIT_DEPTH_FROM_PIXEL_FORMAT: c_int = 0;
+    pub const JXL_BIT_DEPTH_FROM_CODESTREAM: c_int = 1;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -287,6 +291,10 @@ pub mod ffi {
             settings: *mut c_void,
             frame_header: *const JxlFrameHeader,
         ) -> JxlEncoderStatus;
+        pub fn JxlEncoderSetFrameBitDepth(
+            settings: *mut c_void,
+            bit_depth: *const JxlBitDepth,
+        ) -> JxlEncoderStatus;
         pub fn JxlEncoderProcessOutput(
             enc: *mut c_void,
             next_out: *mut *mut u8,
@@ -326,6 +334,29 @@ impl Error for JxlError {}
 
 fn err(msg: impl std::fmt::Display) -> JxlError {
     JxlError(msg.to_string())
+}
+
+/// Mirrors what cjxl does for pixel imports: declare the input buffer's
+/// actual sample width explicitly. Without this the encoder assumes the
+/// default (`JXL_BIT_DEPTH_FROM_PIXEL_FORMAT`), which is only correct when
+/// the buffer is full-range for its data type; setting `FROM_CODESTREAM`
+/// with the stream's bits makes the import unambiguous (cjxl's PNM decoder
+/// does exactly this).
+fn push_input_bit_depth(
+    settings: *mut std::ffi::c_void,
+    enc: *mut std::ffi::c_void,
+    bits: u32,
+) -> Result<(), JxlError> {
+    let bd = ffi::JxlBitDepth {
+        bit_depth_type: ffi::JXL_BIT_DEPTH_FROM_CODESTREAM,
+        bits_per_sample: bits,
+        exponent_bits_per_sample: 0,
+    };
+    enc_status(
+        unsafe { ffi::JxlEncoderSetFrameBitDepth(settings, &bd) },
+        enc,
+        "JxlEncoderSetFrameBitDepth",
+    )
 }
 
 fn enc_status(
@@ -548,6 +579,8 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
             "JxlEncoderFrameSettingsSetOption(EFFORT)",
         )?;
 
+        push_input_bit_depth(settings, enc, bits)?;
+
         if options.lossless {
             enc_status(
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
@@ -574,7 +607,7 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
                     ffi::JxlEncoderFrameSettingsSetOption(
                         settings,
                         ffi::JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM,
-                        2, // kNone
+                        1, // kNone (enum: kXYB=0, kNone=1, kYCbCr=2)
                     )
                 },
                 enc,
@@ -799,6 +832,8 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
             enc,
             "JxlEncoderFrameSettingsSetOption(EFFORT)",
         )?;
+        let anim_bits: u32 = if is_u16 { 16 } else { 8 };
+        push_input_bit_depth(settings, enc, anim_bits)?;
         if options.lossless {
             enc_status(
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
@@ -823,7 +858,7 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
                     ffi::JxlEncoderFrameSettingsSetOption(
                         settings,
                         ffi::JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM,
-                        2, // kNone
+                        1, // kNone (enum: kXYB=0, kNone=1, kYCbCr=2)
                     )
                 },
                 enc,

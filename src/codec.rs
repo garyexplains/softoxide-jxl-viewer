@@ -497,6 +497,27 @@ fn decode_gif(bytes: &[u8]) -> Result<LoadedImage, String> {
     })
 }
 
+/// sRGB target color encoding for the app's SDR decode pipeline.
+///
+/// When the file is *already* sRGB, the request mirrors the file's own
+/// rendering intent so that jxl-oxide treats `request_color_encoding` as an
+/// identity operation and skips the CMS pass entirely. Requesting a
+/// *different* intent than the file declares (e.g. `Perceptual` over a
+/// `Relative`-intent sRGB file) makes moxcms run a float round-trip through
+/// a color matrix that perturbs lossless pixels by ±1-2 values, which would
+/// break exact-lossless round-trips and shift lossy output slightly.
+/// Non-sRGB files (wide gamut, HDR, plain gamma) go through the CMS as
+/// intended, targeting sRGB/Perceptual for consistent display.
+fn srgb_display_target(image: &jxl_oxide::JxlImage) -> jxl_oxide::EnumColourEncoding {
+    use jxl_oxide::color::ColourEncoding;
+    match &image.image_header().metadata.colour_encoding {
+        ColourEncoding::Enum(enc) if enc.is_srgb() => {
+            jxl_oxide::EnumColourEncoding::srgb(enc.rendering_intent)
+        }
+        _ => jxl_oxide::EnumColourEncoding::srgb(jxl_oxide::RenderingIntent::Perceptual),
+    }
+}
+
 fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
     use jxl_oxide::{EnumColourEncoding, JxlImage, RenderingIntent};
 
@@ -508,7 +529,9 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
     // (The moxcms feature is enabled for this crate; make it explicit.)
     image.set_cms(jxl_oxide::Moxcms);
 
-    let _ = image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Perceptual));
+    // See `srgb_display_target`.
+    let target = srgb_display_target(&image);
+    let _ = image.request_color_encoding(target);
 
     let file_bits = image.image_header().metadata.bit_depth.bits_per_sample();
 
@@ -566,7 +589,8 @@ fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         .read(Cursor::new(bytes))
         .map_err(|e| format!("jxl header: {e}"))?;
     image.set_cms(jxl_oxide::Moxcms);
-    let _ = image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Perceptual));
+    let target = srgb_display_target(&image);
+    let _ = image.request_color_encoding(target);
 
     let has_alpha = image
         .image_header()

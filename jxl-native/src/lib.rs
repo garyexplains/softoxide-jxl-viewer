@@ -71,6 +71,7 @@ pub mod ffi {
     pub const JXL_TRANSFER_FUNCTION_SRGB: c_int = 13;
 
     pub type JxlRenderingIntent = c_int;
+    pub const JXL_RENDERING_INTENT_PERCEPTUAL: c_int = 0;
     pub const JXL_RENDERING_INTENT_RELATIVE: c_int = 1;
 
     pub type JxlOrientation = c_int;
@@ -164,6 +165,8 @@ pub mod ffi {
     pub const JXL_ENC_FRAME_SETTING_MODULAR: c_int = 11;
     /// -1 = encoding default, 0..3 = 128/256/512/1024
     pub const JXL_ENC_FRAME_SETTING_MODULAR_GROUP_SIZE: c_int = 26;
+    /// Explicit color transform: -1 default (XYB), 0 XYB, 1 YCbCr, 2 none.
+    pub const JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM: c_int = 24;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -410,11 +413,19 @@ unsafe impl Send for ThreadRunner {}
 unsafe impl Sync for ThreadRunner {}
 
 impl ThreadRunner {
+    /// Worker count: `JXLVIEWER_THREADS` env override (1..64), otherwise the
+    /// machine's usable parallelism capped at 16.
     pub fn with_default_threads() -> ThreadRunner {
-        let n = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(16);
+        let n = std::env::var("JXLVIEWER_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| (1..=64).contains(&n))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .min(16)
+            });
         Self::for_threads(n)
     }
 
@@ -512,7 +523,8 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
         color.white_point = ffi::JXL_WHITE_POINT_D65;
         color.primaries = ffi::JXL_PRIMARIES_SRGB;
         color.transfer_function = ffi::JXL_TRANSFER_FUNCTION_SRGB;
-        color.rendering_intent = ffi::JXL_RENDERING_INTENT_RELATIVE;
+        // Perceptual, to match what cjxl emits — see FFI note.
+        color.rendering_intent = ffi::JXL_RENDERING_INTENT_PERCEPTUAL;
         enc_status(
             unsafe { ffi::JxlEncoderSetColorEncoding(enc, &color) },
             enc,
@@ -541,6 +553,32 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
                 enc,
                 "JxlEncoderSetFrameLossless",
+            )?;
+            // Belt-and-braces: force the same configuration that
+            // `SetLossless()` applies internally (modular, no color
+            // transform). Without an explicit push, some paths could retain
+            // VarDCT-ish heuristics that perturb exact pixels.
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_MODULAR,
+                        1,
+                    )
+                },
+                enc,
+                "MODULAR(lossless)",
+            )?;
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM,
+                        2, // kNone
+                    )
+                },
+                enc,
+                "COLOR_TRANSFORM=None(lossless)",
             )?;
         } else {
             enc_status(
@@ -738,7 +776,8 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
         color.white_point = ffi::JXL_WHITE_POINT_D65;
         color.primaries = ffi::JXL_PRIMARIES_SRGB;
         color.transfer_function = ffi::JXL_TRANSFER_FUNCTION_SRGB;
-        color.rendering_intent = ffi::JXL_RENDERING_INTENT_RELATIVE;
+        // Perceptual, to match what cjxl emits — mirrors encode_dynamic.
+        color.rendering_intent = ffi::JXL_RENDERING_INTENT_PERCEPTUAL;
         enc_status(
             unsafe { ffi::JxlEncoderSetColorEncoding(enc, &color) },
             enc,
@@ -765,6 +804,30 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
                 unsafe { ffi::JxlEncoderSetFrameLossless(settings) },
                 enc,
                 "JxlEncoderSetFrameLossless",
+            )?;
+            // Belt-and-braces: mirrors encode_dynamic — modular, no color
+            // transform, so animated lossless frames stay bit-exact too.
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_MODULAR,
+                        1,
+                    )
+                },
+                enc,
+                "MODULAR(lossless anim)",
+            )?;
+            enc_status(
+                unsafe {
+                    ffi::JxlEncoderFrameSettingsSetOption(
+                        settings,
+                        ffi::JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM,
+                        2, // kNone
+                    )
+                },
+                enc,
+                "COLOR_TRANSFORM=None(lossless anim)",
             )?;
         } else {
             enc_status(

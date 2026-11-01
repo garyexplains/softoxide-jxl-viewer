@@ -1017,6 +1017,132 @@ pub fn save_animation_to_path(
     write_atomic(path, &buf)
 }
 
+impl SaveOptions {
+    /// The canonical file extension for this format (what batch conversion
+    /// appends to every output path).
+    pub fn extension(&self) -> &'static str {
+        match self {
+            SaveOptions::Jxl(_) => "jxl",
+            SaveOptions::Png => "png",
+            SaveOptions::Jpeg(_) => "jpg",
+            SaveOptions::Bmp => "bmp",
+            SaveOptions::Tiff => "tiff",
+            SaveOptions::Gif => "gif",
+        }
+    }
+}
+
+/// Decodes `input` and encodes it to `output` (animations stay animated when
+/// the target format supports them: GIF and JPEG XL).
+pub fn convert_file(input: &Path, output: &Path, opts: &SaveOptions) -> Result<(), String> {
+    let img = decode_file(input)?;
+    match img.animation {
+        Some(anim) if matches!(opts, SaveOptions::Gif | SaveOptions::Jxl(_)) => {
+            save_animation_to_path(output, &anim.frames, &anim.durations_ms, anim.loops, opts)
+        }
+        _ => save_to_path(output, &img.raster, opts),
+    }
+}
+
+/// "name.png" exists → "name (2).png", "name (3).png", … (Explorer-style).
+pub fn unique_output_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let ext = path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("."));
+    for n in 2..1_000_000u32 {
+        let cand = if ext.is_empty() {
+            dir.join(format!("{stem} ({n})"))
+        } else {
+            dir.join(format!("{stem} ({n}).{ext}"))
+        };
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// What to do when a batch output file already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictAction {
+    Overwrite,
+    Skip,
+    Unique,
+}
+
+/// Result of a batch conversion run.
+#[derive(Debug, Default)]
+pub struct BatchSummary {
+    pub converted: usize,
+    pub skipped_same_ext: usize,
+    pub skipped_existing: usize,
+    pub failed: Vec<String>,
+    pub cancelled: bool,
+}
+
+/// Converts a list of files sequentially: same folder, same stem, target
+/// extension. `progress(done_index, name)` fires before each file; `cancel`
+/// stops the run after the file in progress.
+pub fn batch_convert(
+    paths: &[PathBuf],
+    opts: &SaveOptions,
+    conflict: ConflictAction,
+    progress: impl Fn(usize, &str),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> BatchSummary {
+    use std::sync::atomic::Ordering;
+
+    let target_ext = opts.extension();
+    let mut s = BatchSummary::default();
+
+    for (i, src) in paths.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            s.cancelled = true;
+            break;
+        }
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| src.display().to_string());
+        progress(i, &name);
+
+        let src_ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if src_ext == target_ext {
+            s.skipped_same_ext += 1;
+            continue;
+        }
+        let mut out = src.with_extension(target_ext);
+        if out.exists() {
+            match conflict {
+                ConflictAction::Overwrite => {}
+                ConflictAction::Skip => {
+                    s.skipped_existing += 1;
+                    continue;
+                }
+                ConflictAction::Unique => out = unique_output_path(&out),
+            }
+        }
+        match convert_file(src, &out, opts) {
+            Ok(()) => s.converted += 1,
+            Err(e) => s.failed.push(format!("{name}: {e}")),
+        }
+    }
+    s
+}
+
 /// Encodes frames as an animated JPEG XL (sRGB; lossless or lossy per the
 /// options; alpha preserved unless `keep_alpha` is off).
 pub fn encode_anim_jxl(

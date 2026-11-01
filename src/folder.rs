@@ -125,8 +125,11 @@ pub struct FolderState {
     pub sort_desc: bool,
     /// Longest side of the thumbnail box (96..=512).
     pub thumb_size: f32,
-    /// Index of the current selection (keyboard + last opened).
+    /// Index of the current selection (keyboard + last opened). With a
+    /// multi-selection active this is the anchor/cursor cell.
     pub selected: usize,
+    /// Multi-selection (path-keyed, survives re-sorts). `None` = single mode.
+    pub multi: Option<HashSet<PathBuf>>,
     /// Column count of the last grid layout (keyboard up/down step).
     pub columns: usize,
     /// When set, the grid scrolls this file into view once, then clears.
@@ -169,6 +172,7 @@ impl FolderState {
             selected: 0,
             columns: 1,
             scroll_to: None,
+            multi: None,
             thumbs: HashMap::new(),
             thumb_order: Vec::new(),
             inflight: HashSet::new(),
@@ -233,8 +237,113 @@ impl FolderState {
         }
     }
 
+    /// Adopts the thumb cache / failed-set of a previous state (same folder,
+    /// after a rescan): entries for files no longer present are pruned.
+    pub fn adopt_cache(&mut self, old: FolderState) {
+        let present = &self.files;
+        let keep = |p: &PathBuf| present.iter().any(|f| f == p);
+        self.thumbs = old.thumbs.into_iter().filter(|(p, _)| keep(p)).collect();
+        self.thumb_order = old.thumb_order.into_iter().filter(keep).collect();
+        self.failed = old.failed.into_iter().filter(keep).collect();
+        // In-flight decodes keep running; their results arrive on the new
+        // channel (see request_thumb's sender) only for the OLD receiver —
+        // drop them: needs_thumb will re-request what's visible.
+        self.inflight.clear();
+    }
+
     pub fn has_thumb(&self, path: &Path) -> bool {
         self.thumbs.contains_key(path)
+    }
+
+    // ---- selection ---------------------------------------------------------
+
+    /// Visual selection state of a cell: in multi mode, membership in the
+    /// set; otherwise equality with the single selected index.
+    pub fn is_selected(&self, idx: usize) -> bool {
+        match &self.multi {
+            Some(set) => self.files.get(idx).is_some_and(|p| set.contains(p)),
+            None => self.selected == idx,
+        }
+    }
+
+    /// Mouse click on a cell: plain = single-select, Ctrl = toggle membership,
+    /// Shift = range from the anchor cell.
+    pub fn click(&mut self, idx: usize, ctrl: bool, shift: bool) {
+        if idx >= self.files.len() {
+            return;
+        }
+        if shift {
+            let a = self.selected.min(idx);
+            let b = self.selected.max(idx);
+            let mut set = self.multi.take().unwrap_or_default();
+            set.extend(self.files[a..=b].iter().cloned());
+            self.multi = Some(set);
+            self.selected = idx;
+        } else if ctrl {
+            let mut set = self
+                .multi
+                .take()
+                .unwrap_or_else(|| self.files.get(self.selected).cloned().into_iter().collect());
+            let p = self.files[idx].clone();
+            if !set.remove(&p) {
+                set.insert(p);
+            }
+            self.multi = Some(set);
+            self.selected = idx;
+        } else {
+            self.multi = None;
+            self.selected = idx;
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.multi = Some(self.files.iter().cloned().collect());
+    }
+
+    /// Selects every file whose extension is (or, with `except`, is not)
+    /// `ext` — case-insensitive.
+    pub fn select_all_ext(&mut self, ext: &str, except: bool) {
+        self.multi = Some(
+            self.files
+                .iter()
+                .filter(|p| {
+                    let is = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case(ext))
+                        .unwrap_or(false);
+                    is != except
+                })
+                .cloned()
+                .collect(),
+        );
+        if self.multi.as_ref().is_some_and(|s| s.is_empty()) {
+            self.multi = None;
+        }
+    }
+
+    pub fn select_none(&mut self) {
+        self.multi = None;
+    }
+
+    /// The files a batch operation should process, in listing order.
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        match &self.multi {
+            Some(set) => self
+                .files
+                .iter()
+                .filter(|p| set.contains(*p))
+                .cloned()
+                .collect(),
+            None => self.files.get(self.selected).cloned().into_iter().collect(),
+        }
+    }
+
+    pub fn selected_count(&self) -> usize {
+        match &self.multi {
+            Some(set) => set.len(),
+            None => 1,
+        }
     }
 
     pub fn thumb(&self, path: &Path) -> Option<&TextureHandle> {

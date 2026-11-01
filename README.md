@@ -14,7 +14,12 @@ views. It runs unchanged on Windows, macOS and Linux.
 - **Folder grid**: "Folder…" (Ctrl+Shift+O) shows every supported image in a folder as a
   thumbnail grid (lazy-loading, off-thread decode, memory-budgeted LRU cache). The grid
   header sorts by **name or date** (ascending/descending toggle) and adjusts the
-  **thumbnail size** (slider 96–512 px, or `+`/`−` keys). Double-click (or Enter)
+  **thumbnail size** (slider 96-512 px, or `+`/`-` keys). Select one file, many
+  (Ctrl/Shift-click), or bulk-select via the header `Select…` menu or right-click
+  (All / All .jxl / All except .jxl / None). **Convert N…** applies one set of save
+  options (the Save-as dialog options) to the whole selection — outputs land next to
+  each source with overwrite/skip/numbered-name handling, a progress readout, and a
+  Cancel button. Double-click (or Enter)
   opens an image; **Esc** returns to the grid at the same spot. `jxlviewer <FOLDER>` opens
   a folder directly.
 - **Animation playback** for animated JXL: all keyframes are decoded, played in a loop at the

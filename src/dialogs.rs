@@ -5,7 +5,7 @@ use eframe::egui;
 use egui::Align2;
 
 use crate::app::{App, SaveFormat};
-use crate::codec::{JpegSaveOptions, JxlSaveOptions, SaveOptions};
+use crate::codec::{self, JpegSaveOptions, JxlSaveOptions, SaveOptions};
 use crate::icons;
 use crate::raster::ResizeFilter;
 
@@ -541,5 +541,123 @@ pub fn show_associations_dialog(ctx: &egui::Context, app: &mut App) {
 
     if !open {
         app.assoc_open = false;
+    }
+}
+
+/// Folder-grid batch conversion: one set of save options applied to every
+/// selected image. Outputs go next to each source (same stem, target
+/// extension); three policies handle name collisions.
+pub fn show_batch_dialog(ctx: &egui::Context, app: &mut App) {
+    let Some(mut dlg) = app.batch_dialog.take() else {
+        return;
+    };
+    let paths = app
+        .folder
+        .as_ref()
+        .map(|f| f.selected_paths())
+        .unwrap_or_default();
+    let target_ext = format_ext(dlg.format);
+    let convertible = paths
+        .iter()
+        .filter(|p| {
+            let src_ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            src_ext != target_ext
+        })
+        .count();
+
+    let mut open = true;
+    let mut consumed = false;
+
+    egui::Window::new(format!("Convert {} images", paths.len()))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            // Format picker (same buttons as Save-as, minus the picker).
+            ui.horizontal(|ui| {
+                for (f, label) in [
+                    (SaveFormat::Jxl, "JXL"),
+                    (SaveFormat::Png, "PNG"),
+                    (SaveFormat::Jpeg, "JPEG"),
+                    (SaveFormat::Bmp, "BMP"),
+                    (SaveFormat::Tiff, "TIFF"),
+                    (SaveFormat::Gif, "GIF"),
+                ] {
+                    if ui.selectable_label(dlg.format == f, label).clicked() {
+                        dlg.format = f;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            match dlg.format {
+                SaveFormat::Jxl => jxl_options(ui, &mut dlg.jxl),
+                SaveFormat::Jpeg => jpeg_options(ui, &mut dlg.jpeg),
+                _ => {
+                    ui.label("No format-specific options.");
+                }
+            }
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new(format!(
+                    "Outputs go next to each source image, same file name, .{target_ext} extension."
+                ))
+                .weak(),
+            );
+            if convertible < paths.len() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} file(s) are already {} and will be skipped.",
+                        paths.len() - convertible,
+                        target_ext.to_uppercase()
+                    ))
+                    .weak(),
+                );
+            }
+            ui.add_space(4.0);
+            ui.label("If the output file already exists:");
+            ui.radio_value(
+                &mut dlg.conflict,
+                codec::ConflictAction::Overwrite,
+                "Overwrite it",
+            );
+            ui.radio_value(
+                &mut dlg.conflict,
+                codec::ConflictAction::Skip,
+                "Skip the file",
+            );
+            ui.radio_value(
+                &mut dlg.conflict,
+                codec::ConflictAction::Unique,
+                "Save with a numbered name  (photo (2).png)",
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        convertible > 0,
+                        egui::Button::new(format!("{}  Convert", icons::CHECK_CIRCLE)),
+                    )
+                    .clicked()
+                {
+                    consumed = true;
+                    app.start_batch_job(paths.clone(), dlg.save_options(), dlg.conflict);
+                }
+                if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
+                    consumed = true;
+                }
+            });
+        });
+
+    if !open || consumed {
+        app.batch_dialog = None;
+    } else {
+        app.batch_dialog = Some(dlg);
     }
 }

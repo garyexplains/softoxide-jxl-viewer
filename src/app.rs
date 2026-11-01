@@ -2,6 +2,7 @@
 //! and background save/convert jobs.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui;
@@ -94,8 +95,35 @@ pub(crate) struct ResizeDialogState {
     pub(crate) filter: ResizeFilter,
 }
 
+pub(crate) struct BatchDialogState {
+    pub(crate) format: SaveFormat,
+    pub(crate) jxl: JxlSaveOptions,
+    pub(crate) jpeg: JpegSaveOptions,
+    pub(crate) conflict: codec::ConflictAction,
+}
+
+impl BatchDialogState {
+    /// The current dialog settings as `SaveOptions`.
+    pub(crate) fn save_options(&self) -> SaveOptions {
+        match self.format {
+            SaveFormat::Jxl => SaveOptions::Jxl(self.jxl.clone()),
+            SaveFormat::Jpeg => SaveOptions::Jpeg(self.jpeg.clone()),
+            SaveFormat::Png => SaveOptions::Png,
+            SaveFormat::Bmp => SaveOptions::Bmp,
+            SaveFormat::Tiff => SaveOptions::Tiff,
+            SaveFormat::Gif => SaveOptions::Gif,
+        }
+    }
+}
+
 pub enum UiMsg {
     Done(Result<String, String>),
+    /// Batch-conversion heartbeat: file index just started + total.
+    BatchProgress {
+        done: usize,
+        total: usize,
+        name: String,
+    },
 }
 
 pub struct App {
@@ -131,6 +159,13 @@ pub struct App {
     pub(crate) assoc_rows: Vec<AssocRow>,
     pub(crate) assoc_msg: Option<(bool, String)>,
 
+    /// Batch-convert dialog (folder grid).
+    pub(crate) batch_dialog: Option<BatchDialogState>,
+    /// Cancel flag for the running batch job.
+    pub(crate) busy_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// (done, total) while a batch job runs, for the overlay progress bar.
+    pub(crate) busy_progress: Option<(usize, usize)>,
+
     pub(crate) busy: Option<String>,
     /// When the current save job started, for the elapsed-seconds readout.
     pub(crate) busy_started: Option<std::time::Instant>,
@@ -151,6 +186,17 @@ pub struct App {
 }
 
 const UNDO_LIMIT: usize = 5;
+
+/// Opens the batch-convert dialog for the grid selection with a smart
+/// default format (all-.jxl selection → PNG target, otherwise JXL).
+fn app_batch_open(app: &mut App, format: SaveFormat) {
+    app.batch_dialog = Some(BatchDialogState {
+        format,
+        jxl: JxlSaveOptions::default(),
+        jpeg: JpegSaveOptions::default(),
+        conflict: codec::ConflictAction::Skip,
+    });
+}
 
 /// One row of the Windows file-associations dialog.
 pub(crate) struct AssocRow {
@@ -185,6 +231,9 @@ impl App {
             assoc_open: false,
             assoc_rows: Vec::new(),
             assoc_msg: None,
+            batch_dialog: None,
+            busy_cancel: None,
+            busy_progress: None,
             busy: None,
             busy_started: None,
             task_rx: None,
@@ -468,6 +517,7 @@ impl App {
         self.task_rx = Some(rx);
         self.busy = Some(format!("Encoding {}…", file_name(&path)));
         self.busy_started = Some(std::time::Instant::now());
+        self.busy_progress = None;
         self.status.clear();
         self.save_dialog = None;
         let raster = doc.raster;
@@ -500,28 +550,121 @@ impl App {
         });
     }
 
-    fn poll_messages(&mut self, ctx: &egui::Context) {
-        if let Some(rx) = &self.task_rx {
-            if let Ok(msg) = rx.try_recv() {
-                match msg {
-                    UiMsg::Done(Ok(what)) => {
-                        self.busy = None;
-                        self.busy_started = None;
-                        self.status = what;
-                    }
-                    UiMsg::Done(Err(e)) => {
-                        self.busy = None;
-                        self.busy_started = None;
-                        self.error = Some(e);
-                    }
-                }
-                self.task_rx = None;
-                ctx.request_repaint();
+    /// Batch-converts the given files (folder grid selection) with one set of
+    /// save options. Outputs go next to each source (same stem, target
+    /// extension). Progress streams via `UiMsg::BatchProgress`; the Cancel
+    /// flag stops the run after the file in progress.
+    pub(crate) fn start_batch_job(
+        &mut self,
+        paths: Vec<PathBuf>,
+        opts: SaveOptions,
+        conflict: codec::ConflictAction,
+    ) {
+        if self.busy.is_some() || paths.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        self.task_rx = Some(rx);
+        self.busy = Some(format!("Converting 0/{}…", paths.len()));
+        self.busy_started = Some(std::time::Instant::now());
+        self.busy_progress = None;
+        self.status.clear();
+        self.batch_dialog = None;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.busy_cancel = Some(cancel.clone());
+        let total = paths.len();
+        std::thread::spawn(move || {
+            let summary = codec::batch_convert(
+                &paths,
+                &opts,
+                conflict,
+                |done, name| {
+                    let _ = tx.send(UiMsg::BatchProgress {
+                        done,
+                        total,
+                        name: name.to_string(),
+                    });
+                },
+                &cancel,
+            );
+
+            let head = if summary.cancelled {
+                format!("Cancelled — {} converted", summary.converted)
             } else {
-                // Keep the spinner animating and the elapsed counter ticking
-                // even when nothing else wants a repaint.
-                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                format!("Converted {} of {} images", summary.converted, total)
+            };
+            let mut parts = vec![head];
+            if summary.skipped_same_ext > 0 {
+                parts.push(format!(
+                    "{} already in the target format (skipped)",
+                    summary.skipped_same_ext
+                ));
             }
+            if summary.skipped_existing > 0 {
+                parts.push(format!(
+                    "{} existing outputs skipped",
+                    summary.skipped_existing
+                ));
+            }
+            if !summary.failed.is_empty() {
+                parts.push(format!(
+                    "{} failed: {}",
+                    summary.failed.len(),
+                    summary
+                        .failed
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+            let _ = tx.send(UiMsg::Done(Ok(parts.join(" — "))));
+        });
+    }
+
+    fn poll_messages(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.task_rx else { return };
+        let mut progress_seen = false;
+        let mut finished = false;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                UiMsg::BatchProgress { done, total, name } => {
+                    self.busy = Some(format!("Converting {}/{} — {}…", done + 1, total, name));
+                    self.busy_progress = Some((done, total));
+                    progress_seen = true;
+                }
+                UiMsg::Done(Ok(what)) => {
+                    self.busy = None;
+                    self.busy_started = None;
+                    self.busy_progress = None;
+                    self.status = what;
+                    finished = true;
+                }
+                UiMsg::Done(Err(e)) => {
+                    self.busy = None;
+                    self.busy_started = None;
+                    self.busy_progress = None;
+                    self.error = Some(e);
+                    finished = true;
+                }
+            }
+        }
+        if finished {
+            self.task_rx = None;
+            self.busy_cancel = None;
+            // The folder listing may have changed (batch created files, or a
+            // save renamed nothing but times moved on) — refresh silently.
+            if let Some(f) = &self.folder {
+                let root = f.root.clone();
+                self.open_folder_at(root, false);
+            }
+        } else if progress_seen {
+            ctx.request_repaint();
+        } else {
+            // Keep the spinner animating and the elapsed counter ticking
+            // even when nothing else wants a repaint.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 }
@@ -666,6 +809,14 @@ impl eframe::App for App {
         });
 
         self.show_dialogs(&ctx);
+
+        // Modal-ish overlay while a job (save/batch) runs: unmissable
+        // "working" indicator with progress and Cancel; the central panel
+        // beneath stays visible but frozen.
+        if self.busy.is_some() {
+            self.show_busy_overlay(ui, &ctx);
+        }
+
         self.update_window_title(&ctx);
     }
 }
@@ -765,6 +916,18 @@ impl App {
                 ctx.request_repaint();
                 return;
             }
+            // In grid mode ESC clears an active multi-selection.
+            if self.mode == ViewMode::Folder {
+                let had = self
+                    .folder
+                    .as_mut()
+                    .map(|f| f.multi.take().is_some())
+                    .unwrap_or(false);
+                if had {
+                    ctx.request_repaint();
+                }
+                return;
+            }
             // Back out to the folder grid when one is active (and we're not
             // already looking at it).
             if self.folder.is_some() && self.mode == ViewMode::Single {
@@ -855,13 +1018,22 @@ impl App {
         }
 
         // ---- folder-grid mode -------------------------------------------------
-        // In grid mode, arrows move the selection, Enter/double-click opens,
-        // and the image-editing shortcuts don't apply.
+        // In grid mode, arrows move the selection, Ctrl+A selects all,
+        // Enter/double-click opens, and the image-editing shortcuts don't
+        // apply.
         if self.mode == ViewMode::Folder {
+            if locked {
+                return; // batch conversion running — grid is frozen
+            }
             let Some(folder) = &mut self.folder else {
                 return;
             };
             if folder.files.is_empty() {
+                return;
+            }
+            if ctrl && pressed(egui::Key::A) {
+                folder.select_all();
+                ctx.request_repaint();
                 return;
             }
             let n = folder.files.len();
@@ -1532,8 +1704,64 @@ impl App {
 
     // ---- folder grid -------------------------------------------------------
 
+    /// Centered mask + card shown while a job runs: spinner, label, progress
+    /// bar (batch), and Cancel (batch). Covers the central panel so grid/canvas
+    /// interactions are impossible while working.
+    fn show_busy_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(busy) = self.busy.clone() else {
+            return;
+        };
+        let Some(rect) = self.canvas_rect else { return };
+
+        // Veil over the whole central panel.
+        let veil = ui.painter_at(rect);
+        veil.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
+
+        let overlay_id = egui::Id::unique(&std::process::id());
+        egui::Area::new(overlay_id)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+            .show(ctx, |ui| {
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.heading(egui::RichText::new("Working…").strong());
+                        ui.add_space(4.0);
+                        ui.spinner();
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(&busy).weak());
+                        if let Some((done, total)) = &self.busy_progress {
+                            let frac = if *total > 0 {
+                                (*done as f32 / *total as f32).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            ui.add(egui::ProgressBar::new(frac).show_percentage());
+                            ui.label(format!("{} / {} files", done, total));
+                        }
+                        if let Some(cancel) = &self.busy_cancel {
+                            ui.add_space(6.0);
+                            if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
+                                cancel.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                });
+            });
+        // The spinner needs frames to animate even when nothing else repaints.
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+    }
+
+    // ---- folder grid -------------------------------------------------------
+
     /// Central-panel folder view: grid of thumbnails, double-click opens.
+    /// While a batch job runs, the header and cells render non-interactive
+    /// (the progress overlay in `ui()` covers the panel).
     fn show_folder_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // The central rect doubles as the busy-veil area for `ui()`'s overlay.
+        self.canvas_rect = Some(ui.available_rect_before_wrap());
+        let locked = self.busy.is_some();
+
         let Some(folder) = &mut self.folder else {
             ui.centered_and_justified(|ui| {
                 ui.label("No folder open — use Open folder… (Ctrl+Shift+O)");
@@ -1546,10 +1774,71 @@ impl App {
         // the folder borrow ends.
         let mut pref_sort: Option<(SortKey, bool)> = None;
         let mut pref_size: Option<f32> = None;
+        let mut open_batch: Option<SaveFormat> = None;
 
-        // ---- grid header: sort + thumbnail size ---------------------------
-        {
+        // ---- grid header: select / convert / sort / size --------------------
+        if !locked {
+            let selected_count = folder.selected_count();
+            let multi = folder.multi.is_some();
             ui.horizontal(|ui| {
+                ui.menu_button("Select…", |ui| {
+                    if ui.button("All").clicked() {
+                        folder.select_all();
+                        ui.close();
+                    }
+                    if ui.button("All .jxl images").clicked() {
+                        folder.select_all_ext("jxl", false);
+                        ui.close();
+                    }
+                    if ui.button("All except .jxl").clicked() {
+                        folder.select_all_ext("jxl", true);
+                        ui.close();
+                    }
+                    if ui.button("None").clicked() {
+                        folder.select_none();
+                        ui.close();
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(if multi {
+                        format!("{selected_count} selected")
+                    } else {
+                        String::new()
+                    })
+                    .weak(),
+                );
+
+                if ui
+                    .add_enabled(
+                        selected_count > 0,
+                        egui::Button::new(format!(
+                            "{}  Convert {}…",
+                            icons::CHECK_CIRCLE,
+                            selected_count
+                        )),
+                    )
+                    .on_hover_text("Batch-convert the selected images with one set of save options")
+                    .clicked()
+                {
+                    // Smart default format: .jxl selection → PNG; everything
+                    // else → JPEG XL.
+                    let paths = folder.selected_paths();
+                    let all_jxl = !paths.is_empty()
+                        && paths.iter().all(|p| {
+                            p.extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e.eq_ignore_ascii_case("jxl"))
+                                .unwrap_or(false)
+                        });
+                    let format = if all_jxl {
+                        SaveFormat::Png
+                    } else {
+                        SaveFormat::Jxl
+                    };
+                    open_batch = Some(format);
+                }
+
+                ui.separator();
                 ui.label("Sort:");
                 let mut key = folder.sort_key;
                 egui::ComboBox::from_id_salt("grid_sort")
@@ -1634,10 +1923,16 @@ impl App {
                     ui.horizontal(|ui| {
                         for idx in row_start..row_end {
                             let path = folder.files[idx].clone();
-                            let selected = folder.selected == idx;
+                            let selected = folder.is_selected(idx);
 
-                            let (rect, resp) =
-                                ui.allocate_exact_size(egui::vec2(cell_w, cell_h), Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(cell_w, cell_h),
+                                if locked {
+                                    Sense::hover()
+                                } else {
+                                    Sense::click()
+                                },
+                            );
                             let painter = ui.painter_at(rect);
                             let bg = if selected {
                                 Color32::from_rgb(52, 62, 92)
@@ -1710,11 +2005,37 @@ impl App {
                                 },
                             );
 
-                            if resp.clicked() {
-                                folder.selected = idx;
-                            }
-                            if resp.double_clicked() {
-                                open_idx = Some(idx);
+                            if !locked {
+                                if resp.clicked() {
+                                    let mods = ctx.input(|i| i.modifiers);
+                                    folder.click(idx, mods.ctrl, mods.shift);
+                                }
+                                if resp.double_clicked() {
+                                    open_idx = Some(idx);
+                                }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Open").clicked() {
+                                        open_idx = Some(idx);
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Select all").clicked() {
+                                        folder.select_all();
+                                        ui.close();
+                                    }
+                                    if ui.button("Select all .jxl").clicked() {
+                                        folder.select_all_ext("jxl", false);
+                                        ui.close();
+                                    }
+                                    if ui.button("Select all except .jxl").clicked() {
+                                        folder.select_all_ext("jxl", true);
+                                        ui.close();
+                                    }
+                                    if ui.button("Deselect all").clicked() {
+                                        folder.select_none();
+                                        ui.close();
+                                    }
+                                });
                             }
                             if let Some(target) = scroll_to {
                                 if target == idx {
@@ -1744,6 +2065,9 @@ impl App {
         if let Some(s) = pref_size {
             self.grid_thumb_size = s;
         }
+        if let Some(format) = open_batch {
+            app_batch_open(self, format);
+        }
 
         // Open after the ScrollArea closure is done (folder borrow released).
         if let Some(idx) = open_idx {
@@ -1764,10 +2088,16 @@ impl App {
         ui.horizontal(|ui| {
             if self.mode == ViewMode::Folder {
                 let folder_info = self.folder.as_ref().map(|f| {
+                    let multi = if f.multi.is_some() {
+                        format!(" · {} selected", f.selected_count())
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{} images — {}{}",
+                        "{} images — {}{}{}",
                         f.files.len(),
                         f.root.display(),
+                        multi,
                         if f.selected < f.files.len() {
                             format!(
                                 " · {}/{} {}",
@@ -1813,6 +2143,11 @@ impl App {
                 ui.spinner();
                 let secs = self.busy_started.map_or(0, |t| t.elapsed().as_secs());
                 ui.label(format!("{busy} ({secs}s)"));
+                if let Some(cancel) = &self.busy_cancel {
+                    if ui.button("Cancel").clicked() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
             }
             if let Some(err) = &self.error {
                 ui.colored_label(
@@ -1827,6 +2162,7 @@ impl App {
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         crate::dialogs::show_save_dialog(ctx, self);
         crate::dialogs::show_resize_dialog(ctx, self);
+        crate::dialogs::show_batch_dialog(ctx, self);
         #[cfg(windows)]
         crate::dialogs::show_associations_dialog(ctx, self);
         self.show_crop_bar(ctx);

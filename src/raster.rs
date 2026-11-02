@@ -195,10 +195,13 @@ impl Raster {
     pub fn rotate_180(&self) -> Raster {
         let ch = self.channels();
         let mut out = self.data.zeroed_like(self.data.len());
-        let n = (self.width as usize * self.height as usize) * ch;
-        for i in 0..n {
-            let j = n - 1 - i;
-            write_sample(&self.data, i, &mut out, j);
+        let (w, h) = (self.width as usize, self.height as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let src = (y * w + x) * ch;
+                let dst = ((h - 1 - y) * w + (w - 1 - x)) * ch;
+                copy_pixel(&self.data, src, &mut out, dst, ch);
+            }
         }
         Raster {
             width: self.width,
@@ -244,6 +247,21 @@ impl Raster {
             has_alpha: self.has_alpha,
             bits: self.bits,
             data: out,
+        }
+    }
+
+    /// Applies EXIF orientation 2..=8 as pixel transforms (1 = no-op; other
+    /// values ignored). 5/7 (transpose/transverse) also swap the dimensions.
+    pub fn apply_exif_orientation(&self, orientation: u16) -> Raster {
+        match orientation {
+            2 => self.flip_h(),
+            3 => self.rotate_180(),
+            4 => self.flip_v(),
+            5 => self.rotate_cw().flip_h(),
+            6 => self.rotate_cw(),
+            7 => self.rotate_cw().flip_v(),
+            8 => self.rotate_ccw(),
+            _ => self.clone(),
         }
     }
 
@@ -490,15 +508,6 @@ fn copy_pixel(src: &Samples, src_off: usize, dst: &mut Samples, dst_off: usize, 
     }
 }
 
-#[inline]
-fn write_sample(src: &Samples, src_i: usize, dst: &mut Samples, dst_i: usize) {
-    match (src, &mut *dst) {
-        (Samples::U8(s), Samples::U8(d)) => d[dst_i] = s[src_i],
-        (Samples::U16(s), Samples::U16(d)) => d[dst_i] = s[src_i],
-        _ => unreachable!("sample type changed"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +544,12 @@ mod tests {
 
         let rot180 = r.rotate_180();
         assert_eq!(rot180.data.len(), r.data.len());
+        // Pixel (0,0) becomes old (w-1, h-1) with channels intact (RGB).
+        if let Samples::U8(v) = &rot180.data {
+            assert_eq!(&v[0..3], &[21, 0, 0]); // old R = 2*10+1
+        } else {
+            panic!("expected u8 samples");
+        }
 
         let flipped = r.flip_v();
         assert_eq!(flipped.width, 3);

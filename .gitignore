@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 jxl-native/target/
+/build/
+/dist/
+/scripts/
 
 # Vendored native sources (fetched via tools/fetch-libjxl.*)
 /third_party/

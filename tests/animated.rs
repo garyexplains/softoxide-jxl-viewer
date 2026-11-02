@@ -35,6 +35,7 @@ fn animated_jxl_frames_and_durations() {
         frames,
         durations_ms: durations.clone(),
         loops: 0, // infinite
+        boxes: Vec::new(),
         options: jxl_native::EncodeOptions {
             lossless: true,
             effort: 3,
@@ -90,6 +91,7 @@ fn animated_jxl_saves_as_animated_gif() {
         frames,
         durations_ms: vec![100; 4],
         loops: 0,
+        boxes: Vec::new(),
         options: jxl_native::EncodeOptions {
             lossless: true,
             effort: 3,
@@ -106,12 +108,13 @@ fn animated_jxl_saves_as_animated_gif() {
     let dir = std::env::temp_dir().join(format!("jxlviewer-gif-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let gif_path = dir.join("out.gif");
-    codec::save_animation_to_path(
+    codec::save_animation_to_path_with_meta(
         &gif_path,
         &anim.frames,
         &anim.durations_ms,
         anim.loops,
         &codec::SaveOptions::Gif,
+        None,
     )
     .expect("gif save");
 
@@ -171,6 +174,7 @@ fn gif_to_jxl_roundtrip() {
         frames,
         durations_ms: vec![100; 4],
         loops: 7,
+        boxes: Vec::new(),
         options: jxl_native::EncodeOptions {
             lossless: true,
             effort: 3,
@@ -189,12 +193,13 @@ fn gif_to_jxl_roundtrip() {
     let dir = std::env::temp_dir().join(format!("jxlviewer-gif2jxl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let gif_path = dir.join("mid.gif");
-    codec::save_animation_to_path(
+    codec::save_animation_to_path_with_meta(
         &gif_path,
         &anim1.frames,
         &anim1.durations_ms,
         anim1.loops,
         &codec::SaveOptions::Gif,
+        None,
     )
     .expect("gif save");
 
@@ -232,6 +237,7 @@ fn gif_to_jxl_roundtrip() {
             effort: 3,
             ..Default::default()
         },
+        None,
     )
     .expect("re-encode anim jxl");
 

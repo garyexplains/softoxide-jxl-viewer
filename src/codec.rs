@@ -129,6 +129,8 @@ pub struct LoadedImage {
     pub hdr: Option<&'static str>,
     /// All keyframes + per-frame durations when the file is animated.
     pub animation: Option<Animation>,
+    /// EXIF/XMP/IPTC carried by the source file (None = none tracked).
+    pub meta: Option<crate::meta::ImageMetadata>,
 }
 
 /// Decoded animation: one raster per keyframe and its display duration.
@@ -167,12 +169,27 @@ pub fn decode_file(path: &Path) -> Result<LoadedImage, String> {
 
 pub fn decode_from_bytes(bytes: &[u8], ext_hint: Option<&str>) -> Result<LoadedImage, String> {
     let format = detect_format(bytes, ext_hint);
-    match format {
+    let mut img = match format {
         Format::Jxl => decode_jxl(bytes),
         Format::Gif => decode_gif(bytes),
-        Format::Unknown => Err("unknown file format".to_string()),
+        Format::Unknown => return Err("unknown file format".to_string()),
         _ => decode_with_image_crate(bytes, format, ext_hint),
+    }?;
+    // Non-JXL containers are decoded without rotation; apply the EXIF
+    // orientation ourselves (GIF carries none, so this is a no-op there).
+    if format != Format::Jxl {
+        if let Some(mut meta) = crate::meta::from_bytes(bytes, format) {
+            let orientation = meta.orientation();
+            if let Some(o) = orientation {
+                img.raster = img.raster.apply_exif_orientation(o);
+                if let Some(ex) = meta.exif.as_mut() {
+                    ex.applied = true;
+                }
+            }
+            img.meta = Some(meta);
+        }
     }
+    Ok(img)
 }
 
 /// JPEG XL decode preference order:
@@ -188,6 +205,10 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
     });
     let animated = peek.as_ref().is_some_and(|p| p.animated);
     let header_bits = peek.as_ref().map(|p| p.bits).filter(|b| *b > 8);
+    let (peek_orientation, mut peek_meta) = match peek {
+        Some(p) => (p.orientation, p.meta),
+        None => (1, None),
+    };
 
     // HDR content: never take the integer paths — they would pass PQ/HLG
     // samples through unconverted or clip them harshly. Decode in the source
@@ -214,6 +235,13 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
 
     if header_bits.is_some() {
         if let Ok(raster) = decode_jxl_libjxl(bytes, 16) {
+            // libjxl already applied the orientation to the pixels.
+            let mut meta = peek_meta.take();
+            if (2..=8).contains(&peek_orientation) {
+                if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+                    ex.applied = true;
+                }
+            }
             return Ok(LoadedImage {
                 raster,
                 format: Format::Jxl,
@@ -221,6 +249,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
                 note: Some("decoded with libjxl (16-bit exact path)".into()),
                 hdr: None,
                 animation: None,
+                meta,
             });
         }
     }
@@ -237,13 +266,23 @@ fn decode_jxl(bytes: &[u8]) -> Result<LoadedImage, String> {
             }
         }
         Err(primary_err) => decode_jxl_libjxl(bytes, 8)
-            .map(|raster| LoadedImage {
-                raster,
-                format: Format::Jxl,
-                via_fallback: true,
-                note: Some(format!("decoded with libjxl fallback ({primary_err})")),
-                hdr: None,
-                animation: None,
+            .map(|raster| {
+                // libjxl already applied the orientation to the pixels.
+                let mut meta = peek_meta.take();
+                if (2..=8).contains(&peek_orientation) {
+                    if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+                        ex.applied = true;
+                    }
+                }
+                LoadedImage {
+                    raster,
+                    format: Format::Jxl,
+                    via_fallback: true,
+                    note: Some(format!("decoded with libjxl fallback ({primary_err})")),
+                    hdr: None,
+                    animation: None,
+                    meta,
+                }
             })
             .map_err(|fallback_err| {
                 format!("JPEG XL decode failed — jxl-oxide: {primary_err}; libjxl: {fallback_err}")
@@ -255,18 +294,66 @@ struct JxlPeek {
     bits: u32,
     hdr: Option<jxl_oxide::HdrType>,
     animated: bool,
+    /// Display orientation from the basic-info header (1..8).
+    orientation: u16,
+    /// EXIF/XMP from container boxes (cheap: header-side parse).
+    meta: Option<crate::meta::ImageMetadata>,
 }
 
-/// Cheap header peek: sample bit depth, HDR transfer function, animated flag.
+/// Cheap header peek: sample bit depth, HDR transfer function, animated flag,
+/// orientation, and container-box metadata.
 fn jxl_header_peek(bytes: &[u8]) -> Result<JxlPeek, String> {
     let image = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(bytes))
         .map_err(|e| format!("jxl header: {e}"))?;
+    let orientation = image.image_header().metadata.orientation as u16;
+    let meta = jxl_meta_from_boxes(&image);
     Ok(JxlPeek {
         bits: image.image_header().metadata.bit_depth.bits_per_sample(),
         hdr: image.hdr_type(),
         animated: image.image_header().metadata.animation.is_some(),
+        orientation,
+        meta,
     })
+}
+
+/// EXIF/XMP carried in JXL container boxes, via the already-open jxl-oxide
+/// image (no extra parse).
+fn jxl_meta_from_boxes(image: &jxl_oxide::JxlImage) -> Option<crate::meta::ImageMetadata> {
+    let boxes = image.aux_boxes();
+    let exif_tiff = match boxes.first_exif() {
+        Ok(data) if data.has_data() => {
+            let raw = data.unwrap();
+            let off = raw.tiff_header_offset() as usize;
+            raw.payload().get(off..).map(|t| t.to_vec())
+        }
+        _ => None,
+    };
+    let xml = boxes.first_xml().unwrap_or(&[]);
+    let xmp = (!xml.is_empty()).then(|| xml.to_vec());
+    crate::meta::from_jxl(exif_tiff, xmp)
+}
+
+/// jxl-oxide renders unrotated pixels, so apply the header orientation
+/// ourselves (2..=8). Marks the carried EXIF applied for later save
+/// neutralization.
+fn apply_jxl_orientation(
+    raster: &Raster,
+    orientation: u16,
+    meta: &mut Option<crate::meta::ImageMetadata>,
+) -> Raster {
+    let rotated = (2..=8).contains(&orientation);
+    let out = if rotated {
+        raster.apply_exif_orientation(orientation)
+    } else {
+        raster.clone()
+    };
+    if rotated {
+        if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+            ex.applied = true;
+        }
+    }
+    out
 }
 
 /// HDR (PQ/HLG) decode: renders in the source encoding as f32 and applies a
@@ -311,6 +398,10 @@ fn decode_jxl_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedIma
         .map_err(|e| format!("render frame: {e}"))?;
     let raster = hdr_frame_raster(&render, tf, has_alpha, peak_from_meta);
 
+    let orientation = image.image_header().metadata.orientation as u16;
+    let mut meta = jxl_meta_from_boxes(&image);
+    let raster = apply_jxl_orientation(&raster, orientation, &mut meta);
+
     Ok(LoadedImage {
         raster,
         format: Format::Jxl,
@@ -318,6 +409,7 @@ fn decode_jxl_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<LoadedIma
         note: None,
         hdr: Some(tf.as_str()),
         animation: None,
+        meta,
     })
 }
 
@@ -479,6 +571,7 @@ fn decode_gif(bytes: &[u8]) -> Result<LoadedImage, String> {
             note: None,
             hdr: None,
             animation: None,
+            meta: None,
         });
     }
 
@@ -494,6 +587,7 @@ fn decode_gif(bytes: &[u8]) -> Result<LoadedImage, String> {
             durations_ms,
             loops,
         }),
+        meta: None,
     })
 }
 
@@ -547,6 +641,10 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         .map_err(|e| format!("render frame: {e}"))?;
     let raster = sdr_frame_raster(&render, has_alpha, file_bits > 8);
 
+    let orientation = image.image_header().metadata.orientation as u16;
+    let mut meta = jxl_meta_from_boxes(&image);
+    let raster = apply_jxl_orientation(&raster, orientation, &mut meta);
+
     Ok(LoadedImage {
         raster,
         format: Format::Jxl,
@@ -554,6 +652,7 @@ fn decode_jxl_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         note: None,
         hdr: None,
         animation: None,
+        meta,
     })
 }
 
@@ -615,17 +714,31 @@ fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
         .unwrap_or(0);
 
     let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
+    let orientation = image.image_header().metadata.orientation as u16;
+    let rotated = (2..=8).contains(&orientation);
     let mut frames = Vec::with_capacity(n);
     let mut durations_ms = Vec::with_capacity(n);
     for idx in 0..n {
         let render = image
             .render_frame(idx)
             .map_err(|e| format!("render frame {idx}: {e}"))?;
-        frames.push(sdr_frame_raster(&render, has_alpha, deep));
+        let frame = sdr_frame_raster(&render, has_alpha, deep);
+        frames.push(if rotated {
+            frame.apply_exif_orientation(orientation)
+        } else {
+            frame
+        });
         durations_ms.push(animation_duration_ms(render.duration(), tps_num, tps_den));
     }
     if frames.is_empty() {
         return Err("animation contains no frames".into());
+    }
+
+    let mut meta = jxl_meta_from_boxes(&image);
+    if rotated {
+        if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+            ex.applied = true;
+        }
     }
 
     let raster = frames[0].clone();
@@ -640,6 +753,7 @@ fn decode_jxl_anim_oxide(bytes: &[u8]) -> Result<LoadedImage, String> {
             durations_ms,
             loops,
         }),
+        meta,
     })
 }
 
@@ -690,17 +804,31 @@ fn decode_jxl_anim_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<Load
         .unwrap_or(0);
 
     let n = image.num_loaded_keyframes().min(MAX_ANIM_FRAMES);
+    let orientation = image.image_header().metadata.orientation as u16;
+    let rotated = (2..=8).contains(&orientation);
     let mut frames = Vec::with_capacity(n);
     let mut durations_ms = Vec::with_capacity(n);
     for idx in 0..n {
         let render = image
             .render_frame(idx)
             .map_err(|e| format!("render frame {idx}: {e}"))?;
-        frames.push(hdr_frame_raster(&render, tf, has_alpha, peak_from_meta));
+        let frame = hdr_frame_raster(&render, tf, has_alpha, peak_from_meta);
+        frames.push(if rotated {
+            frame.apply_exif_orientation(orientation)
+        } else {
+            frame
+        });
         durations_ms.push(animation_duration_ms(render.duration(), tps_num, tps_den));
     }
     if frames.is_empty() {
         return Err("animation contains no frames".into());
+    }
+
+    let mut meta = jxl_meta_from_boxes(&image);
+    if rotated {
+        if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+            ex.applied = true;
+        }
     }
 
     let raster = frames[0].clone();
@@ -715,6 +843,7 @@ fn decode_jxl_anim_hdr_oxide(bytes: &[u8], tf: crate::hdr::HdrTf) -> Result<Load
             durations_ms,
             loops,
         }),
+        meta,
     })
 }
 
@@ -852,6 +981,7 @@ fn decode_with_image_crate(
             note: None,
             hdr: None,
             animation: None,
+            meta: None,
         });
     }
     if let image::DynamicImage::ImageRgb16(rgb16) = &dynamic {
@@ -862,6 +992,7 @@ fn decode_with_image_crate(
             note: None,
             hdr: None,
             animation: None,
+            meta: None,
         });
     }
     if let image::DynamicImage::ImageLumaA16(la) = &dynamic {
@@ -880,6 +1011,7 @@ fn decode_with_image_crate(
             note: None,
             hdr: None,
             animation: None,
+            meta: None,
         });
     }
     if let image::DynamicImage::ImageLuma16(l) = &dynamic {
@@ -897,6 +1029,7 @@ fn decode_with_image_crate(
             note: None,
             hdr: None,
             animation: None,
+            meta: None,
         });
     }
 
@@ -920,6 +1053,7 @@ fn decode_with_image_crate(
         note: None,
         hdr: None,
         animation: None,
+        meta: None,
     })
 }
 
@@ -972,10 +1106,27 @@ pub enum SaveOptions {
 }
 
 pub fn encode_to_vec(raster: &Raster, opts: &SaveOptions) -> Result<Vec<u8>, String> {
+    encode_to_vec_with_meta(raster, opts, None)
+}
+
+/// Metadata-aware save: carries EXIF/XMP/IPTC into containers that support it
+/// (JPEG XL boxes, PNG eXIf/iTXt-XMP chunks, JPEG APP1/APP13 segments).
+///
+/// Orientation note: the encoded pixels are the *upright* (already-oriented)
+/// ones the viewer displays, so a carried EXIF block gets its orientation tag
+/// rewritten to 1 — otherwise viewers honoring EXIF would rotate the save a
+/// second time. TIFF/BMP/GIF containers don't carry our metadata (documented
+/// in the README).
+pub fn encode_to_vec_with_meta(
+    raster: &Raster,
+    opts: &SaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<Vec<u8>, String> {
     match opts {
-        SaveOptions::Jxl(j) => encode_jxl(raster, j),
-        SaveOptions::Jpeg(j) => encode_jpeg(raster, j),
-        SaveOptions::Png => encode_png(raster),
+        SaveOptions::Jxl(j) => encode_jxl(raster, j, meta),
+        SaveOptions::Jpeg(j) => encode_jpeg(raster, j, meta),
+        SaveOptions::Png => encode_png(raster, meta),
+        // Formats without a metadata carry path.
         SaveOptions::Bmp => encode_bmp(raster),
         SaveOptions::Tiff => encode_tiff(raster),
         // Still image GIF (a single frame, short delay). Animated exports go
@@ -996,7 +1147,16 @@ fn write_atomic(path: &Path, buf: &[u8]) -> Result<(), String> {
 }
 
 pub fn save_to_path(path: &Path, raster: &Raster, opts: &SaveOptions) -> Result<(), String> {
-    let buf = encode_to_vec(raster, opts)?;
+    save_to_path_with_meta(path, raster, opts, None)
+}
+
+pub fn save_to_path_with_meta(
+    path: &Path,
+    raster: &Raster,
+    opts: &SaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<(), String> {
+    let buf = encode_to_vec_with_meta(raster, opts, meta)?;
     write_atomic(path, &buf)
 }
 
@@ -1009,9 +1169,20 @@ pub fn save_animation_to_path(
     loops: u32,
     opts: &SaveOptions,
 ) -> Result<(), String> {
+    save_animation_to_path_with_meta(path, frames, durations_ms, loops, opts, None)
+}
+
+pub fn save_animation_to_path_with_meta(
+    path: &Path,
+    frames: &[Raster],
+    durations_ms: &[u32],
+    loops: u32,
+    opts: &SaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<(), String> {
     let buf = match opts {
         SaveOptions::Gif => encode_gif(frames, durations_ms, loops)?,
-        SaveOptions::Jxl(j) => encode_anim_jxl(frames, durations_ms, loops, j)?,
+        SaveOptions::Jxl(j) => encode_anim_jxl(frames, durations_ms, loops, j, meta)?,
         other => return Err(format!("{:?} does not support animated save", other)),
     };
     write_atomic(path, &buf)
@@ -1035,12 +1206,32 @@ impl SaveOptions {
 /// Decodes `input` and encodes it to `output` (animations stay animated when
 /// the target format supports them: GIF and JPEG XL).
 pub fn convert_file(input: &Path, output: &Path, opts: &SaveOptions) -> Result<(), String> {
-    let img = decode_file(input)?;
+    convert_file_with_meta(input, output, opts, false)
+}
+
+/// Same, but with metadata carry-through: each source file's own EXIF/XMP/
+/// IPTC is extracted and embedded in the output when the target format
+/// supports it (JPEG XL / PNG / JPEG).
+pub fn convert_file_with_meta(
+    input: &Path,
+    output: &Path,
+    opts: &SaveOptions,
+    keep_meta: bool,
+) -> Result<(), String> {
+    let mut img = decode_file(input)?;
+    let meta = if keep_meta { img.meta.take() } else { None };
     match img.animation {
         Some(anim) if matches!(opts, SaveOptions::Gif | SaveOptions::Jxl(_)) => {
-            save_animation_to_path(output, &anim.frames, &anim.durations_ms, anim.loops, opts)
+            save_animation_to_path_with_meta(
+                output,
+                &anim.frames,
+                &anim.durations_ms,
+                anim.loops,
+                opts,
+                meta.as_ref(),
+            )
         }
-        _ => save_to_path(output, &img.raster, opts),
+        _ => save_to_path_with_meta(output, &img.raster, opts, meta.as_ref()),
     }
 }
 
@@ -1091,11 +1282,13 @@ pub struct BatchSummary {
 
 /// Converts a list of files sequentially: same folder, same stem, target
 /// extension. `progress(done_index, name)` fires before each file; `cancel`
-/// stops the run after the file in progress.
+/// stops the run after the file in progress. `keep_meta` carries each
+/// source's own EXIF/XMP/IPTC into the output (when the target supports it).
 pub fn batch_convert(
     paths: &[PathBuf],
     opts: &SaveOptions,
     conflict: ConflictAction,
+    keep_meta: bool,
     progress: impl Fn(usize, &str),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> BatchSummary {
@@ -1135,7 +1328,7 @@ pub fn batch_convert(
                 ConflictAction::Unique => out = unique_output_path(&out),
             }
         }
-        match convert_file(src, &out, opts) {
+        match convert_file_with_meta(src, &out, opts, keep_meta) {
             Ok(()) => s.converted += 1,
             Err(e) => s.failed.push(format!("{name}: {e}")),
         }
@@ -1150,6 +1343,7 @@ pub fn encode_anim_jxl(
     durations_ms: &[u32],
     loops: u32,
     opts: &JxlSaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
 ) -> Result<Vec<u8>, String> {
     use crate::raster::Samples;
 
@@ -1182,6 +1376,17 @@ pub fn encode_anim_jxl(
         })
         .collect();
 
+    // Metadata carry-through (see encode_jxl).
+    let mut boxes = Vec::new();
+    if let Some(meta) = meta {
+        if let Some(ex) = &meta.exif {
+            boxes.push(("Exif", crate::meta::exif_box_content(ex)));
+        }
+        if let Some(xmp) = &meta.xmp {
+            boxes.push(("xml ", xmp.clone()));
+        }
+    }
+
     jxl_native::encode_anim_dynamic(jxl_native::AnimEncodeInput {
         width: first.width,
         height: first.height,
@@ -1189,6 +1394,7 @@ pub fn encode_anim_jxl(
         frames: pixels,
         durations_ms: durations_ms.to_vec(),
         loops,
+        boxes,
         options: jxl_native::EncodeOptions {
             lossless: opts.lossless,
             distance: opts.distance,
@@ -1233,7 +1439,11 @@ fn encode_gif(frames: &[Raster], durations_ms: &[u32], loops: u32) -> Result<Vec
     Ok(out)
 }
 
-pub fn encode_jxl(raster: &Raster, opts: &JxlSaveOptions) -> Result<Vec<u8>, String> {
+pub fn encode_jxl(
+    raster: &Raster,
+    opts: &JxlSaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<Vec<u8>, String> {
     let has_alpha = raster.has_alpha && opts.keep_alpha;
     let pixels = match &raster.data {
         crate::raster::Samples::U8(buf) => {
@@ -1256,11 +1466,25 @@ pub fn encode_jxl(raster: &Raster, opts: &JxlSaveOptions) -> Result<Vec<u8>, Str
         }
     };
 
+    // Metadata carry-through: EXIF as an "Exif" box (with the orientation
+    // tag neutralized — the saved pixels are upright) and XMP as an "xml "
+    // box. IPTC has no standard JXL box; it is skipped here.
+    let mut boxes = Vec::new();
+    if let Some(meta) = meta {
+        if let Some(ex) = &meta.exif {
+            boxes.push(("Exif", crate::meta::exif_box_content(ex)));
+        }
+        if let Some(xmp) = &meta.xmp {
+            boxes.push(("xml ", xmp.clone()));
+        }
+    }
+
     jxl_native::encode_dynamic(jxl_native::EncodeInput {
         width: raster.width,
         height: raster.height,
         has_alpha,
         pixels,
+        boxes,
         options: jxl_native::EncodeOptions {
             lossless: opts.lossless,
             distance: opts.distance,
@@ -1281,7 +1505,11 @@ fn drop_alpha_to_rgb<T: Copy + Default>(buf: &[T]) -> Vec<T> {
     out
 }
 
-fn encode_jpeg(raster: &Raster, opts: &JpegSaveOptions) -> Result<Vec<u8>, String> {
+fn encode_jpeg(
+    raster: &Raster,
+    opts: &JpegSaveOptions,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<Vec<u8>, String> {
     let flat = if raster.has_alpha {
         raster.flattened_over([255, 255, 255])
     } else {
@@ -1307,10 +1535,33 @@ fn encode_jpeg(raster: &Raster, opts: &JpegSaveOptions) -> Result<Vec<u8>, Strin
         image::ExtendedColorType::Rgb8,
     )
     .map_err(|e| format!("jpeg encode: {e}"))?;
+
+    // Metadata carry-through: EXIF APP1 (orientation neutralized), XMP APP1
+    // ("http://ns.adobe.com/xap/1.0/\0") and IPTC APP13 ("Photoshop 3.0").
+    if let Some(meta) = meta {
+        if let Some(ex) = &meta.exif {
+            crate::meta::jpeg_insert_segment(
+                &mut out,
+                0xE1,
+                &crate::meta::jpeg_exif_app1_payload(ex),
+            );
+        }
+        if let Some(xmp) = &meta.xmp {
+            let mut payload = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+            payload.extend_from_slice(xmp);
+            crate::meta::jpeg_insert_segment(&mut out, 0xE1, &payload);
+        }
+        if let Some(iptc) = &meta.iptc {
+            crate::meta::jpeg_insert_segment(&mut out, 0xED, iptc.as_slice());
+        }
+    }
     Ok(out)
 }
 
-fn encode_png(raster: &Raster) -> Result<Vec<u8>, String> {
+fn encode_png(
+    raster: &Raster,
+    meta: Option<&crate::meta::ImageMetadata>,
+) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let enc = image::codecs::png::PngEncoder::new(&mut out);
     match &raster.data {
@@ -1333,6 +1584,18 @@ fn encode_png(raster: &Raster) -> Result<Vec<u8>, String> {
         }
     }
     .map_err(|e| format!("png encode: {e}"))?;
+
+    // Metadata carry-through: eXIf chunk (orientation neutralized) and the
+    // XMP packet in an iTXt chunk (PNG extension conventions).
+    if let Some(meta) = meta {
+        if let Some(ex) = &meta.exif {
+            crate::meta::png_insert_chunk(&mut out, b"eXIf", &crate::meta::exif_png_chunk_data(ex));
+        }
+        if let Some(xmp) = &meta.xmp {
+            let data = crate::meta::png_xmp_itxt_data(xmp);
+            crate::meta::png_insert_chunk(&mut out, b"iTXt", &data);
+        }
+    }
     Ok(out)
 }
 
@@ -1415,8 +1678,41 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
         ),
         None => "\nanimation: no (still image)".to_string(),
     };
+    let meta_line = match &img.meta {
+        Some(m) => {
+            let mut s = String::new();
+            if let Some(ex) = &m.exif {
+                s.push_str(&format!(
+                    "\nexif: {} tags, orientation: {} ({})",
+                    ex.tags.len(),
+                    ex.orientation,
+                    crate::meta::ImageMetadata::orientation_name(ex.orientation),
+                ));
+                for (k, v) in ex.key_fields() {
+                    s.push_str(&format!("\n  {k}: {v}"));
+                }
+            }
+            if let Some(x) = &m.xmp {
+                s.push_str(&format!(
+                    "\nxmp: {} (raw packet)",
+                    crate::meta::human_size(x.len())
+                ));
+            }
+            if let Some(i) = &m.iptc {
+                s.push_str(&format!(
+                    "\niptc: {} (raw)",
+                    crate::meta::human_size(i.len())
+                ));
+            }
+            if m.is_empty() {
+                s.push_str("\nmetadata: none");
+            }
+            s
+        }
+        None => "\nmetadata: none".to_string(),
+    };
     Ok(format!(
-        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}{}{}{}{}",
+        "format: {} ({:?})\nsize: {}×{}\nchannels: {}{}\nsample depth: {}{}{}{}{}{}{}",
         format.as_str(),
         format,
         r.width,
@@ -1436,5 +1732,6 @@ pub fn info_from_bytes(bytes: &[u8], ext: Option<&str>) -> Result<String, String
         hdr_line,
         anim_line,
         format!("\nfile size: {} bytes", bytes.len()),
+        meta_line,
     ))
 }

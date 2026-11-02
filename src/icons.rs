@@ -34,6 +34,7 @@ pub const SKIP_BACK: &str = "\u{E5A4}";
 pub const SKIP_FORWARD: &str = "\u{E5A6}";
 pub const FILM_STRIP: &str = "\u{E792}";
 pub const GEAR: &str = "\u{E270}";
+pub const INFO: &str = "\u{E2CE}";
 pub const ARROW_UP: &str = "\u{E08E}";
 pub const ARROW_DOWN: &str = "\u{E03E}";
 

@@ -40,6 +40,7 @@ fn png_to_jxl_lossless_roundtrip() {
             effort: 3,
             ..Default::default()
         },
+        None,
     )
     .expect("jxl encode should work");
     assert!(jxl[..2] == [0x_FF, 0x0A], "bare jxl codestream signature");
@@ -68,6 +69,7 @@ fn rgb_jxl_lossless_with_tiles() {
             effort: 4,
             ..Default::default()
         },
+        None,
     )
     .expect("encode with tiles");
     let decoded = codec::decode_from_bytes(&enc, Some("jxl")).expect("decode");
@@ -88,6 +90,7 @@ fn jxl_lossy_distance_roundtrip() {
             effort: 5,
             ..Default::default()
         },
+        None,
     )
     .expect("lossy encode");
     let decoded = codec::decode_from_bytes(&enc, Some("jxl")).expect("decode");
@@ -128,6 +131,7 @@ fn png16_looked_lossless() {
             effort: 3,
             ..Default::default()
         },
+        None,
     )
     .expect("encode 16-bit");
     let decoded = codec::decode_from_bytes(&enc, Some("jxl")).expect("decode");
@@ -187,13 +191,13 @@ fn jpeg_save_of_u16_not_black() {
 #[test]
 fn keep_drop_alpha_semantics() {
     let src = make_test_rgba(16, 16);
-    let with_alpha = codec::encode_jxl(&src, &JxlSaveOptions::default()).expect("alpha jxl");
+    let with_alpha = codec::encode_jxl(&src, &JxlSaveOptions::default(), None).expect("alpha jxl");
     let decoded = codec::decode_from_bytes(&with_alpha, Some("jxl")).expect("dec alpha");
     assert!(decoded.raster.has_alpha);
 
     let mut no_alpha_opts = JxlSaveOptions::default();
     no_alpha_opts.keep_alpha = false;
-    let dropped = codec::encode_jxl(&src, &no_alpha_opts).expect("no-alpha jxl");
+    let dropped = codec::encode_jxl(&src, &no_alpha_opts, None).expect("no-alpha jxl");
     let decoded2 = codec::decode_from_bytes(&dropped, Some("jxl")).expect("dec noalpha");
     assert!(!decoded2.raster.has_alpha);
 }

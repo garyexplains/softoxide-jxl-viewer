@@ -86,6 +86,31 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                 }
             }
 
+            // Metadata carry-through (JPEG XL / PNG / JPEG only).
+            let carries_meta = matches!(
+                dlg.format,
+                SaveFormat::Jxl | SaveFormat::Png | SaveFormat::Jpeg
+            );
+            let has_meta = app.doc.as_ref().is_some_and(|d| d.meta.is_some());
+            if has_meta {
+                ui.add_space(6.0);
+                if carries_meta {
+                    ui.checkbox(
+                        &mut dlg.keep_meta,
+                        "Keep metadata (EXIF / XMP / IPTC from the source file)",
+                    )
+                    .on_hover_text(
+                        "Reports camera settings etc. in the saved file. Orientation is \
+                         rewritten to 1 because the saved pixels are already upright.",
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("(Metadata is not carried into BMP/TIFF/GIF files.)")
+                            .weak(),
+                    );
+                }
+            }
+
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Save…").clicked() {
@@ -99,7 +124,7 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
                             SaveFormat::Gif => SaveOptions::Gif,
                         };
                         consumed = true;
-                        save_with_picker(app, dlg.format, opts);
+                        save_with_picker(app, dlg.format, opts, dlg.keep_meta);
                     } else {
                         app.error = Some("no image open".into());
                     }
@@ -121,7 +146,7 @@ pub fn show_save_dialog(ctx: &egui::Context, app: &mut App) {
     }
 }
 
-fn save_with_picker(app: &mut App, format: SaveFormat, opts: SaveOptions) {
+fn save_with_picker(app: &mut App, format: SaveFormat, opts: SaveOptions, keep_meta: bool) {
     let mut dialog = rfd::FileDialog::new().set_title("Save as…");
     if let Some(dir) = &app.last_dir {
         dialog = dialog.set_directory(dir);
@@ -143,7 +168,7 @@ fn save_with_picker(app: &mut App, format: SaveFormat, opts: SaveOptions) {
         dialog = dialog.set_file_name(format!("{stem}.{}", format_ext(format)));
     }
     if let Some(path) = dialog.save_file() {
-        app.start_save_job(path, opts);
+        app.start_save_job(path, opts, keep_meta);
     } else {
         // user cancelled the picker — dialog stays closed (Save as… reopens it)
     }
@@ -636,6 +661,22 @@ pub fn show_batch_dialog(ctx: &egui::Context, app: &mut App) {
                 codec::ConflictAction::Unique,
                 "Save with a numbered name  (photo (2).png)",
             );
+
+            // Per-file metadata carry-through (JPEG XL / PNG / JPEG targets).
+            if matches!(
+                dlg.format,
+                SaveFormat::Jxl | SaveFormat::Png | SaveFormat::Jpeg
+            ) {
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut dlg.keep_meta,
+                    "Keep each source's metadata (EXIF / XMP / IPTC)",
+                )
+                .on_hover_text(
+                    "Every converted file carries its own EXIF/XMP/IPTC. Orientation is \
+                     rewritten to 1 because converted pixels are already upright.",
+                );
+            }
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
@@ -647,7 +688,12 @@ pub fn show_batch_dialog(ctx: &egui::Context, app: &mut App) {
                     .clicked()
                 {
                     consumed = true;
-                    app.start_batch_job(paths.clone(), dlg.save_options(), dlg.conflict);
+                    app.start_batch_job(
+                        paths.clone(),
+                        dlg.save_options(),
+                        dlg.conflict,
+                        dlg.keep_meta,
+                    );
                 }
                 if ui.button(format!("{}  Cancel", icons::X_CIRCLE)).clicked() {
                     consumed = true;
@@ -660,4 +706,122 @@ pub fn show_batch_dialog(ctx: &egui::Context, app: &mut App) {
     } else {
         app.batch_dialog = Some(dlg);
     }
+}
+
+/// Read-only image info: file facts plus EXIF/XMP/IPTC metadata (ⓘ button /
+/// `I`). The EXIF tag list scrolls; long values wrap.
+pub fn show_meta_dialog(ctx: &egui::Context, app: &mut App) {
+    if !app.meta_open {
+        return;
+    }
+    let mut open = true;
+
+    egui::Window::new(format!("{}  Image info", icons::INFO))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(380.0)
+        .anchor(Align2::RIGHT_TOP, [-8.0, 0.0])
+        .show(ctx, |ui| {
+            let Some(doc) = app.doc.as_ref() else {
+                ui.label("No image open.");
+                return;
+            };
+            ui.add_space(4.0);
+
+            egui::Grid::new("meta_file")
+                .num_columns(2)
+                .spacing([10.0, 3.0])
+                .show(ui, |ui| {
+                    file_row(
+                        ui,
+                        "File",
+                        doc.path
+                            .as_ref()
+                            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                            .as_deref()
+                            .unwrap_or("(not saved)"),
+                    );
+                    file_row(
+                        ui,
+                        "Path",
+                        doc.path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(not saved)".into())
+                            .as_str(),
+                    );
+                    file_row(ui, "Format", doc.format.as_str());
+                    file_row(
+                        ui,
+                        "Dimensions",
+                        &format!("{} × {}", doc.raster.width, doc.raster.height),
+                    );
+                    file_row(ui, "Depth", &format!("{}-bit", doc.raster.bits));
+                    file_row(ui, "Alpha", if doc.raster.has_alpha { "yes" } else { "no" });
+                    if let Some(h) = doc.hdr {
+                        file_row(ui, "HDR", &format!("{h} → tone-mapped to SDR"));
+                    }
+                    if let Some(a) = &doc.anim {
+                        file_row(ui, "Animation", &format!("{} frames", a.frame_count()));
+                    }
+                    if doc.dirty {
+                        file_row(ui, "Edits", "modified since load");
+                    }
+                });
+
+            let Some(meta) = &doc.meta else {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("No EXIF/XMP/IPTC metadata in this file.").weak());
+                return;
+            };
+
+            if let Some(ex) = &meta.exif {
+                ui.add_space(10.0);
+                ui.heading(egui::RichText::new("EXIF").weak());
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .id_salt("meta_exif_scroll")
+                    .show(ui, |ui| {
+                        egui::Grid::new("meta_exif")
+                            .num_columns(2)
+                            .spacing([10.0, 2.0])
+                            .show(ui, |ui| {
+                                for (name, value) in &ex.tags {
+                                    ui.label(name.clone());
+                                    ui.label(value.clone());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+            if let Some(xmp) = &meta.xmp {
+                ui.add_space(8.0);
+                ui.label(format!("XMP: {} carried (raw)", size_label(xmp.len())));
+            }
+            if let Some(iptc) = &meta.iptc {
+                ui.label(format!(
+                    "IPTC: {} (Photoshop APP13)",
+                    size_label(iptc.len())
+                ));
+            }
+            if meta.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("No EXIF/XMP/IPTC metadata in this file.").weak());
+            }
+        });
+
+    if !open {
+        app.meta_open = false;
+    }
+}
+
+fn file_row(ui: &mut egui::Ui, name: &str, value: &str) {
+    ui.label(egui::RichText::new(name).weak());
+    ui.label(value.to_string());
+    ui.end_row();
+}
+
+fn size_label(bytes: usize) -> String {
+    crate::meta::human_size(bytes)
 }

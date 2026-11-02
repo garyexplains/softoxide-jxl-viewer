@@ -8,6 +8,7 @@ pub mod dialogs;
 pub mod folder;
 pub mod hdr;
 pub mod icons;
+pub mod meta;
 pub mod nav;
 pub mod raster;
 pub mod view;

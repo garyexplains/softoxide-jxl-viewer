@@ -125,6 +125,7 @@ fn batch_convert_pngs_to_jxl_with_unique_names() {
         &paths,
         &SaveOptions::Jxl(jxl_opts()),
         ConflictAction::Unique,
+        false,
         |_done, _name| {},
         &AtomicBool::new(false),
     );
@@ -160,6 +161,7 @@ fn batch_convert_conflict_policies() {
         &paths,
         &SaveOptions::Jxl(jxl_opts()),
         ConflictAction::Skip,
+        false,
         |_d, _n| {},
         &AtomicBool::new(false),
     );
@@ -171,6 +173,7 @@ fn batch_convert_conflict_policies() {
         &paths,
         &SaveOptions::Jxl(jxl_opts()),
         ConflictAction::Overwrite,
+        false,
         |_d, _n| {},
         &AtomicBool::new(false),
     );
@@ -183,6 +186,7 @@ fn batch_convert_conflict_policies() {
         &paths,
         &SaveOptions::Jxl(jxl_opts()),
         ConflictAction::Overwrite,
+        false,
         |_d, _n| {},
         &cancel,
     );

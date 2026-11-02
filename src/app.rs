@@ -38,6 +38,9 @@ pub(crate) struct Document {
     pub(crate) hdr: Option<&'static str>,
     /// Animation playback state (rasters live in `frames`).
     pub(crate) anim: Option<AnimPlayer>,
+    /// EXIF/XMP/IPTC from the source file (for the info dialog; save-as
+    /// carry-through comes later).
+    pub(crate) meta: Option<crate::meta::ImageMetadata>,
 }
 
 /// Animation data + playback position.
@@ -84,6 +87,8 @@ pub(crate) struct SaveDialogState {
     pub(crate) format: SaveFormat,
     pub(crate) jxl: JxlSaveOptions,
     pub(crate) jpeg: JpegSaveOptions,
+    /// Carry EXIF/XMP/IPTC into the saved file (JXL/PNG/JPEG only).
+    pub(crate) keep_meta: bool,
 }
 
 pub(crate) struct ResizeDialogState {
@@ -100,6 +105,8 @@ pub(crate) struct BatchDialogState {
     pub(crate) jxl: JxlSaveOptions,
     pub(crate) jpeg: JpegSaveOptions,
     pub(crate) conflict: codec::ConflictAction,
+    /// Carry each source's own EXIF/XMP/IPTC into its output.
+    pub(crate) keep_meta: bool,
 }
 
 impl BatchDialogState {
@@ -159,6 +166,9 @@ pub struct App {
     pub(crate) assoc_rows: Vec<AssocRow>,
     pub(crate) assoc_msg: Option<(bool, String)>,
 
+    /// Image info dialog (ⓘ toolbar button / I key).
+    pub(crate) meta_open: bool,
+
     /// Batch-convert dialog (folder grid).
     pub(crate) batch_dialog: Option<BatchDialogState>,
     /// Cancel flag for the running batch job.
@@ -195,6 +205,7 @@ fn app_batch_open(app: &mut App, format: SaveFormat) {
         jxl: JxlSaveOptions::default(),
         jpeg: JpegSaveOptions::default(),
         conflict: codec::ConflictAction::Skip,
+        keep_meta: true,
     });
 }
 
@@ -231,6 +242,7 @@ impl App {
             assoc_open: false,
             assoc_rows: Vec::new(),
             assoc_msg: None,
+            meta_open: false,
             batch_dialog: None,
             busy_cancel: None,
             busy_progress: None,
@@ -450,6 +462,7 @@ impl App {
                         playing: true,
                         frame_started: std::time::Instant::now(),
                     }),
+                    meta: img.meta,
                 });
                 if let Some(note) = &img.note {
                     // Informational (e.g. "decoded with libjxl (16-bit exact
@@ -506,13 +519,14 @@ impl App {
         }
     }
 
-    pub(crate) fn start_save_job(&mut self, path: PathBuf, opts: SaveOptions) {
+    pub(crate) fn start_save_job(&mut self, path: PathBuf, opts: SaveOptions, keep_meta: bool) {
         // Strict lockout backstop: every UI entry point is gated while a job
         // runs; this guarantees no second job can ever start.
         if self.busy.is_some() {
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
+        let carried = if keep_meta { doc.meta.clone() } else { None };
         let (tx, rx) = mpsc::channel::<UiMsg>();
         self.task_rx = Some(rx);
         self.busy = Some(format!("Encoding {}…", file_name(&path)));
@@ -534,8 +548,15 @@ impl App {
                     (
                         Some((frames, durations_ms, loops)),
                         SaveOptions::Gif | SaveOptions::Jxl(_),
-                    ) => codec::save_animation_to_path(&path, &frames, &durations_ms, loops, &opts),
-                    _ => codec::save_to_path(&path, &raster, &opts),
+                    ) => codec::save_animation_to_path_with_meta(
+                        &path,
+                        &frames,
+                        &durations_ms,
+                        loops,
+                        &opts,
+                        carried.as_ref(),
+                    ),
+                    _ => codec::save_to_path_with_meta(&path, &raster, &opts, carried.as_ref()),
                 }));
             let msg = match result {
                 Ok(Ok(())) => UiMsg::Done(Ok(format!(
@@ -559,6 +580,7 @@ impl App {
         paths: Vec<PathBuf>,
         opts: SaveOptions,
         conflict: codec::ConflictAction,
+        keep_meta: bool,
     ) {
         if self.busy.is_some() || paths.is_empty() {
             return;
@@ -578,6 +600,7 @@ impl App {
                 &paths,
                 &opts,
                 conflict,
+                keep_meta,
                 |done, name| {
                     let _ = tx.send(UiMsg::BatchProgress {
                         done,
@@ -979,6 +1002,7 @@ impl App {
                     format: SaveFormat::Jxl,
                     jxl: JxlSaveOptions::default(),
                     jpeg: JpegSaveOptions::default(),
+                    keep_meta: true,
                 });
                 ctx.request_repaint();
             }
@@ -997,6 +1021,13 @@ impl App {
             self.tool = Tool::Crop;
             self.crop_rect = None;
             self.crop_drag = None;
+            ctx.request_repaint();
+            return;
+        }
+
+        // ---- image info (EXIF/XMP/IPTC) ---------------------------------------
+        if plain && pressed(Key::I) {
+            self.meta_open = !self.meta_open;
             ctx.request_repaint();
             return;
         }
@@ -1479,6 +1510,7 @@ impl App {
                     format: SaveFormat::Jxl,
                     jxl: JxlSaveOptions::default(),
                     jpeg: JpegSaveOptions::default(),
+                    keep_meta: true,
                 });
             }
 
@@ -1501,6 +1533,16 @@ impl App {
                 .clicked()
             {
                 self.set_view_zoom(Some(1.0), ctx);
+            }
+
+            // Image info dialog (meta: EXIF/XMP/IPTC).
+            let has = self.doc.is_some();
+            if ui
+                .add_enabled(has, egui::Button::new(icons::INFO))
+                .on_hover_text("Image info (I)")
+                .clicked()
+            {
+                self.meta_open = !self.meta_open;
             }
 
             // Windows-only: per-user file associations (gear icon at the end).
@@ -2162,6 +2204,7 @@ impl App {
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         crate::dialogs::show_save_dialog(ctx, self);
         crate::dialogs::show_resize_dialog(ctx, self);
+        crate::dialogs::show_meta_dialog(ctx, self);
         crate::dialogs::show_batch_dialog(ctx, self);
         #[cfg(windows)]
         crate::dialogs::show_associations_dialog(ctx, self);

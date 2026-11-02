@@ -42,6 +42,9 @@ wgpu = { version = "30.0", default-features = false, features = ["dx12", "wgsl",
 # Common formats (PNG / JPEG / GIF / BMP / TIFF / WebP)
 image = "0.25"
 
+# EXIF parsing (JPEG APP1 / PNG eXIf / TIFF / WebP) and tag display
+kamadak-exif = "0.6.1"
+
 # Pure-Rust JPEG XL decode (with moxcms for sRGB color management)
 jxl-oxide = { version = "0.12.6", features = ["moxcms"] }
 

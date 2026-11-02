@@ -31,6 +31,11 @@ views. It runs unchanged on Windows, macOS and Linux.
   white, Rec.2100 → sRGB gamut conversion). HDR files are tagged in the title bar, status line
   and `info` output.
 - Pure-Rust JXL decode with **color management to sRGB** (moxcms) — CMYK/ICC-profile files render.
+- **Metadata & info**: the toolbar `ⓘ` button (or the `I` key) opens an image-info panel with
+  file facts plus every EXIF tag (parsed with kamadak-exif) and the presence of raw XMP/IPTC.
+  The `info` CLI command prints the same summary (make/model, exposure trio, orientation, …).
+- **EXIF orientation is applied automatically** for JPEG/PNG/TIFF/WebP sources and for JXL
+  (header orientation), so camera-rotated photos display upright everywhere.
 - Zoom (wheel at pointer), pan (drag), fit / 1:1, checkerboard behind transparency.
   Pixel snapping at high zoom, linear filtering otherwise.
 - **Keyboard folder navigation** while viewing a file: `←`/`→` move to the previous/next
@@ -48,6 +53,7 @@ views. It runs unchanged on Windows, macOS and Linux.
 | `P` / `C` | Pan / Crop tool |
 | `R` / `L` | Rotate 90° right / left |
 | `H` / `V` | Flip horizontal / vertical |
+| `I` | Image info (metadata) dialog |
 | `Enter` | Apply the crop selection |
 | `Esc` | Close dialog, clear crop selection, back to Pan |
 | `+` / `−` | Zoom in / out (about canvas center) |
@@ -71,14 +77,23 @@ and renamed, so a save can never leave a truncated image behind.
 ### Conversion
 - **Save as** JPEG XL, PNG, JPEG, BMP, TIFF — right in the GUI (Save As dialog with per-format
   options).
+- **Metadata carry-through**: a **Keep metadata** checkbox (JPEG XL / PNG / JPEG targets)
+  embeds the source file's EXIF/XMP/IPTC — as ISO-BMFF **"Exif"** and **"xml "** boxes in JPEG
+  XL containers (encoded with libjxl itself), `eXIf` + `iTXt` chunks in PNG, and `APP1`
+  (EXIF + XMP) / `APP13` (IPTC) segments in JPEG. TIFF/BMP/GIF exports don't carry metadata.
+  The EXIF **orientation tag is rewritten to 1** in every carried block, because the saved
+  pixels are the upright, already-oriented ones — otherwise viewers honoring EXIF would
+  rotate the export a second time. The batch **Convert N…** dialog has the same option and
+  carries each source file's *own* metadata; the CLI gets `convert --keep-metadata`.
 - **JPEG XL save options**: one-click **presets** (Lossless, Visually lossless, Small — each
   also in a *fast* effort-3 variant) plus *lossless* (mathematically lossless), *distance*
   (VarDCT quality, 1.0 ≈ visually lossless), *effort* (1–10), *keep/drop alpha*, *modular mode*
   and **tile size** (modular group size: 128/256/512/1024 or encoder default).
 - **Headless CLI** for scripting & batch use:
   - `jxlviewer convert IN OUT [--lossless] [--distance 1.0] [--effort 7] [--modular]
-    [--group-size 256] [--keep-alpha] [--quality 90]`
-  - `jxlviewer info FILE…` — format, dimensions, bit depth, alpha.
+    [--group-size 256] [--keep-alpha] [--quality 90] [--keep-metadata]`
+  - `jxlviewer info FILE…` — format, dimensions, bit depth, alpha, plus an EXIF/XMP/IPTC
+    summary (camera, exposure, orientation names, raw-packet sizes).
 
 ### JPEG XL-specific behaviors
 - Loading JXL uses **jxl-oxide** (pure Rust, MIT/Apache) with moxcms color management; exotic
@@ -174,7 +189,8 @@ src/
   view.rs     canvas: zoom/pan math, crop overlay drawing
   dialogs.rs  Save-as (JXL options incl. tiles) and Resize windows
   raster.rs   Raster pixel buffer (RGB/RGBA, 8/16-bit), crop/rotate/flip/resize
-  codec.rs    format sniffing, decode dispatch, save encoders
+  codec.rs    format sniffing, decode dispatch, save encoders incl. metadata carry
+  meta.rs     EXIF/XMP/IPTC extraction (kamadak-exif), save-side box/chunk writers
   icons.rs    vendored Phosphor icon font (assets/fonts/Phosphor.ttf)
   hdr.rs      HDR → SDR: PQ/HLG EOTFs, tone mapping, Rec.2100 → sRGB
   nav.rs      folder navigation: prev/next image by name or mtime
@@ -195,7 +211,10 @@ Decisions worth knowing:
   libjxl is used for encoding and as a decode fallback.
 - `jpegxl-rs` (the GPL-3.0 Rust wrapper for libjxl) was deliberately avoided so this project can
   stay MIT/Apache.
-- Exif orientation for JPEG/PNG inputs is not auto-applied yet.
+- EXIF orientation is applied automatically at decode (JPEG/PNG/TIFF/WebP via the EXIF tag,
+  JXL via its header orientation). On save, the **Keep metadata** option carries EXIF/XMP/
+  IPTC through with the orientation tag neutralized to 1 (pixels are saved upright), so
+  camera info survives JXL↔PNG/JPEG round-trips. TIFF/BMP/GIF have no carry path.
 - Animated JXL plays back, but Save-as exports only the current frame, and editing flattens
   the animation to a still.
 - Lossless JXL of grayscale sources is currently rewritten as RGB (channel expansion) — smaller
@@ -212,6 +231,7 @@ the same terms.
 - **libjxl** (fetched at build time from the pinned v0.12.0 sources, not committed) remains
   under its own BSD-3-Clause license (JPEG XL Project Authors), as do its bundled submodules.
 - Runtime dependencies are MIT/Apache-2.0/BSD-style: egui/eframe, image, fast_image_resize,
-  jxl-oxide, moxcms, rfd, jpeg-encoder, gif. The vendored Phosphor icon font is MIT.
+  jxl-oxide, moxcms, rfd, jpeg-encoder, gif, kamadak-exif (BSD-2-Clause). The vendored
+  Phosphor icon font is MIT.
 - The application icon is original artwork generated by `examples/gen_icon.rs` —
   no third-party assets.

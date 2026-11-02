@@ -12,6 +12,8 @@ pub struct ConvertOptions {
     pub keep_alpha: Option<bool>,
     pub modular: bool,
     pub group_size: Option<jxl_native::GroupSize>,
+    /// Carry EXIF/XMP/IPTC from the source into the output (JXL/PNG/JPEG).
+    pub keep_metadata: bool,
 }
 
 impl Default for ConvertOptions {
@@ -24,14 +26,24 @@ impl Default for ConvertOptions {
             keep_alpha: None,
             modular: false,
             group_size: None,
+            keep_metadata: false,
         }
     }
 }
 
-pub const CONVERT_HELP: &str = "convert usage:\n  jxlviewer convert IN OUT [--lossless] [--distance D] [--effort N]\n\
-     \x20            [--modular] [--group-size N] [--keep-alpha] [--drop-alpha] [--quality Q]\n\n\
- Examples:\n  jxlviewer convert sample.jxl out.png\n  \
- jxlviewer convert sample.png out.jxl --lossless --group-size 256 --modular";
+pub const CONVERT_HELP: &str = concat!(
+    "convert usage:\n",
+    "  jxlviewer convert IN OUT [--lossless] [--distance D] [--effort N]\n",
+    "            [--modular] [--group-size N] [--keep-alpha] [--drop-alpha] [--quality Q]\n",
+    "            [--keep-metadata]\n",
+    "\n",
+    "  --keep-metadata carries EXIF/XMP/IPTC from IN into OUT (JPEG XL/PNG/JPEG;\n",
+    "            orientation is rewritten to 1 because converted pixels are upright).\n",
+    "\n",
+    " Examples:\n",
+    "  jxlviewer convert sample.jxl out.png\n",
+    "  jxlviewer convert sample.png out.jxl --lossless --group-size 256 --modular"
+);
 
 pub const MAIN_HELP: &str = "jxlviewer — SoftOxide JXL Viewer (native JPEG XL viewer & converter, all rendering in-app)\n\n\
  Usage:\n  jxlviewer [FILE]              open the GUI (optionally with FILE)\n\
@@ -178,6 +190,11 @@ pub fn info_cmd(path: &Path) -> Result<String, String> {
 pub fn convert_one(input: &Path, output: &Path, opts: &ConvertOptions) -> Result<String, String> {
     let img = codec::decode_file(input)?;
     let raster = img.raster;
+    let carried = if opts.keep_metadata {
+        img.meta.clone()
+    } else {
+        None
+    };
 
     let out_ext = output
         .extension()
@@ -220,12 +237,13 @@ pub fn convert_one(input: &Path, output: &Path, opts: &ConvertOptions) -> Result
         codec::SaveOptions::Gif | codec::SaveOptions::Jxl(_)
     ) {
         if let Some(anim) = &img.animation {
-            codec::save_animation_to_path(
+            codec::save_animation_to_path_with_meta(
                 output,
                 &anim.frames,
                 &anim.durations_ms,
                 anim.loops,
                 &save_opts,
+                carried.as_ref(),
             )?;
             let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
             return Ok(format!(
@@ -240,7 +258,7 @@ pub fn convert_one(input: &Path, output: &Path, opts: &ConvertOptions) -> Result
             ));
         }
     }
-    codec::save_to_path(output, &raster, &save_opts)?;
+    codec::save_to_path_with_meta(output, &raster, &save_opts, carried.as_ref())?;
     let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     Ok(format!(
         "converted {} ({} {}×{}) → {} ({} bytes)",
@@ -292,6 +310,7 @@ pub fn parse_convert_args(args: &[String]) -> Result<(PathBuf, PathBuf, ConvertO
             }
             "--keep-alpha" => opts.keep_alpha = Some(true),
             "--drop-alpha" => opts.keep_alpha = Some(false),
+            "--keep-metadata" => opts.keep_metadata = true,
             "--quality" => {
                 i += 1;
                 let v = args.get(i).ok_or("--quality needs a value")?;

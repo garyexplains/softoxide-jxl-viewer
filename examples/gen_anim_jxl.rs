@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frames,
         durations_ms: vec![100; COLORS.len()],
         loops: 0, // loop forever
+        boxes: Vec::new(),
         options: jxl_native::EncodeOptions {
             lossless: true,
             effort: 4,

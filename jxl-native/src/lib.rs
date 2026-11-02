@@ -285,6 +285,14 @@ pub mod ffi {
             buffer: *const u8,
             size: usize,
         ) -> JxlEncoderStatus;
+        pub fn JxlEncoderUseBoxes(enc: *mut c_void) -> JxlEncoderStatus;
+        pub fn JxlEncoderAddBox(
+            enc: *mut c_void,
+            ty: *const u8,
+            contents: *const u8,
+            size: usize,
+            compress_box: Jxl_BOOL,
+        ) -> JxlEncoderStatus;
         pub fn JxlEncoderCloseInput(enc: *mut c_void);
         pub fn JxlEncoderInitFrameHeader(frame_header: *mut JxlFrameHeader);
         pub fn JxlEncoderSetFrameHeader(
@@ -477,12 +485,20 @@ impl Drop for ThreadRunner {
     }
 }
 
+/// Metadata box for a JPEG XL container. `"Exif"` contents = 4-byte TIFF
+/// header offset (zeros → TIFF immediately follows) + the TIFF block;
+/// `"xml "` contents = raw XML (XMP packet).
+pub type JxlBox = (&'static str, Vec<u8>);
+
 pub struct EncodeInput {
     pub width: u32,
     pub height: u32,
     pub has_alpha: bool,
     pub pixels: Pixels,
     pub options: EncodeOptions,
+    /// Optional metadata boxes (queued before the frame; enables container
+    /// output automatically).
+    pub boxes: Vec<JxlBox>,
 }
 
 /// Encodes a single frame to a JPEG XL codestream.
@@ -493,6 +509,7 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
         has_alpha,
         pixels,
         options,
+        boxes,
     } = input;
     let w = width as usize;
     let h = height as usize;
@@ -670,6 +687,31 @@ pub fn encode_dynamic(input: EncodeInput) -> Result<Vec<u8>, JxlError> {
             align: 0,
         };
 
+        // Metadata boxes make libjxl emit the container form; they are
+        // buffered internally and written with the codestream.
+        if !boxes.is_empty() {
+            enc_status(
+                unsafe { ffi::JxlEncoderUseBoxes(enc) },
+                enc,
+                "JxlEncoderUseBoxes",
+            )?;
+            for (ty, data) in &boxes {
+                enc_status(
+                    unsafe {
+                        ffi::JxlEncoderAddBox(
+                            enc,
+                            ty.as_ptr(),
+                            data.as_ptr(),
+                            data.len(),
+                            /* compress_box = uncompressed */ 0,
+                        )
+                    },
+                    enc,
+                    "JxlEncoderAddBox",
+                )?;
+            }
+        }
+
         let buf_ptr: *const u8 = match &pixels {
             Pixels::U8(d) => d.as_ptr(),
             Pixels::U16(d) => d.as_ptr() as *const u8,
@@ -743,6 +785,8 @@ pub struct AnimEncodeInput {
     /// Animation loop count, 0 = infinite.
     pub loops: u32,
     pub options: EncodeOptions,
+    /// Optional metadata boxes (see [`EncodeInput::boxes`]).
+    pub boxes: Vec<JxlBox>,
 }
 
 pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> {
@@ -754,6 +798,7 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
         durations_ms,
         loops,
         options,
+        boxes,
     } = input;
     if frames.is_empty() || frames.len() != durations_ms.len() {
         return Err(err("frame/duration count mismatch"));
@@ -923,6 +968,30 @@ pub fn encode_anim_dynamic(input: AnimEncodeInput) -> Result<Vec<u8>, JxlError> 
             endianness: ffi::JXL_NATIVE_ENDIAN,
             align: 0,
         };
+
+        // Metadata boxes (mirrors encode_dynamic; queued before the frames).
+        if !boxes.is_empty() {
+            enc_status(
+                unsafe { ffi::JxlEncoderUseBoxes(enc) },
+                enc,
+                "JxlEncoderUseBoxes",
+            )?;
+            for (ty, data) in &boxes {
+                enc_status(
+                    unsafe {
+                        ffi::JxlEncoderAddBox(
+                            enc,
+                            ty.as_ptr(),
+                            data.as_ptr(),
+                            data.len(),
+                            /* compress_box = uncompressed */ 0,
+                        )
+                    },
+                    enc,
+                    "JxlEncoderAddBox",
+                )?;
+            }
+        }
 
         for (i, frame) in frames.iter().enumerate() {
             let mut fh: ffi::JxlFrameHeader = unsafe { std::mem::zeroed() };

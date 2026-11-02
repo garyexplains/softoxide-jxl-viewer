@@ -14,6 +14,7 @@ use crate::codec::{self, JpegSaveOptions, JxlSaveOptions, SaveOptions};
 use crate::folder::{FolderState, SortKey};
 use crate::icons;
 use crate::raster::{Raster, RasterRect, ResizeFilter};
+use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -169,6 +170,9 @@ pub struct App {
     /// Image info dialog (ⓘ toolbar button / I key).
     pub(crate) meta_open: bool,
 
+    /// Dark (default) / light GUI theme; persisted via a small settings file.
+    pub(crate) theme: Theme,
+
     /// Batch-convert dialog (folder grid).
     pub(crate) batch_dialog: Option<BatchDialogState>,
     /// Cancel flag for the running batch job.
@@ -224,7 +228,12 @@ impl App {
         cc.egui_ctx.set_fonts(fonts);
 
         let checker = build_checker_texture(&cc.egui_ctx);
+        // Load the persisted theme and PIN it before the first frame; eframe
+        // would otherwise follow the OS preference (ThemePreference::System).
+        let theme = crate::theme::Theme::load();
+        cc.egui_ctx.set_theme(theme.egui());
         App {
+            theme,
             doc: None,
             viewer: ViewerState::default(),
             tool: Tool::Pan,
@@ -1345,10 +1354,7 @@ impl App {
             let has = self.doc.is_some();
             let can_edit = has && !locked;
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Undo", icons::ARROW_COUNTER_CLOCKWISE)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::ARROW_U_UP_LEFT))
                 .on_hover_text("Undo (Ctrl+Z)")
                 .clicked()
             {
@@ -1357,7 +1363,7 @@ impl App {
             if ui
                 .add_enabled(
                     can_edit && !self.redo.is_empty(),
-                    egui::Button::new(format!("{}  Redo", icons::ARROW_CLOCKWISE)),
+                    egui::Button::new(icons::ARROW_U_UP_RIGHT),
                 )
                 .on_hover_text("Redo (Ctrl+Y)")
                 .clicked()
@@ -1367,7 +1373,7 @@ impl App {
             ui.separator();
 
             if ui
-                .selectable_label(self.tool == Tool::Pan, format!("{}  Pan", icons::HAND_PALM))
+                .selectable_label(self.tool == Tool::Pan, icons::HAND_PALM)
                 .on_hover_text("Pan tool (P) — drag to move the image")
                 .clicked()
             {
@@ -1378,10 +1384,7 @@ impl App {
             if ui
                 .add_enabled(
                     !locked,
-                    egui::Button::selectable(
-                        self.tool == Tool::Crop,
-                        format!("{}  Crop", icons::CROP),
-                    ),
+                    egui::Button::selectable(self.tool == Tool::Crop, icons::CROP),
                 )
                 .on_hover_text("Crop tool (C) — drag a selection, Enter to apply, Esc to cancel")
                 .clicked()
@@ -1437,40 +1440,28 @@ impl App {
             }
 
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Rotate L", icons::ARROW_COUNTER_CLOCKWISE)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::ARROW_ARC_LEFT))
                 .on_hover_text("Rotate 90° left (L)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_ccw()));
             }
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Rotate R", icons::ARROW_CLOCKWISE)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::ARROW_ARC_RIGHT))
                 .on_hover_text("Rotate 90° right (R)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.rotate_cw()));
             }
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Flip H", icons::FLIP_HORIZONTAL)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::FLIP_HORIZONTAL))
                 .on_hover_text("Flip horizontally (H)")
                 .clicked()
             {
                 self.apply_edit(ctx, |r| Ok(r.flip_h()));
             }
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Flip V", icons::FLIP_VERTICAL)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::FLIP_VERTICAL))
                 .on_hover_text("Flip vertically (V)")
                 .clicked()
             {
@@ -1479,10 +1470,8 @@ impl App {
             ui.separator();
 
             if ui
-                .add_enabled(
-                    can_edit,
-                    egui::Button::new(format!("{}  Resize…", icons::ARROWS_OUT_CARDINAL)),
-                )
+                .add_enabled(can_edit, egui::Button::new(icons::ARROWS_OUT_CARDINAL))
+                .on_hover_text("Resize… (change image dimensions)")
                 .clicked()
             {
                 let (w, h) = {
@@ -1543,6 +1532,19 @@ impl App {
                 .clicked()
             {
                 self.meta_open = !self.meta_open;
+            }
+
+            // Theme toggle: shows the theme you'd switch to (sun in dark
+            // mode, moon in light mode).
+            let (t_icon, t_tip) = if self.theme.is_dark() {
+                (icons::SUN, "Switch to light theme")
+            } else {
+                (icons::MOON, "Switch to dark theme")
+            };
+            if ui.button(t_icon).on_hover_text(t_tip).clicked() {
+                self.theme = self.theme.toggled();
+                ctx.set_theme(self.theme.egui());
+                self.theme.save();
             }
 
             // Windows-only: per-user file associations (gear icon at the end).
@@ -1649,7 +1651,17 @@ impl App {
         self.canvas_rect = Some(avail_rect);
         let (_, response) = ui.allocate_exact_size(avail_rect.size(), Sense::click_and_drag());
         let painter = ui.painter_at(avail_rect);
-        painter.rect_filled(avail_rect, 0.0, Color32::from_rgb(26, 26, 30));
+        // Canvas fill follows the GUI theme (dark keeps the historical near-black).
+        let dark = ui.style().visuals.dark_mode;
+        painter.rect_filled(
+            avail_rect,
+            0.0,
+            if dark {
+                Color32::from_rgb(26, 26, 30)
+            } else {
+                Color32::from_rgb(240, 240, 242)
+            },
+        );
 
         let Some(doc) = &self.doc else {
             painter.text(
@@ -1657,7 +1669,7 @@ impl App {
                 egui::Align2::CENTER_CENTER,
                 "Drag an image here, or press Open…",
                 egui::FontId::proportional(16.0),
-                Color32::GRAY,
+                ui.style().visuals.weak_text_color(),
             );
             return;
         };
@@ -1976,19 +1988,40 @@ impl App {
                                 },
                             );
                             let painter = ui.painter_at(rect);
-                            let bg = if selected {
-                                Color32::from_rgb(52, 62, 92)
-                            } else if resp.hovered() {
-                                Color32::from_rgb(46, 46, 52)
+                            // Grid chrome follows the GUI theme (dark keeps
+                            // the historical palette).
+                            let dark = ui.style().visuals.dark_mode;
+                            let (bg_idle, bg_hover, bg_sel) = if dark {
+                                (
+                                    Color32::from_rgb(38, 38, 44),
+                                    Color32::from_rgb(46, 46, 52),
+                                    Color32::from_rgb(52, 62, 92),
+                                )
                             } else {
-                                Color32::from_rgb(38, 38, 44)
+                                (
+                                    Color32::from_rgb(244, 244, 247),
+                                    Color32::from_rgb(236, 236, 240),
+                                    Color32::from_rgb(198, 222, 252),
+                                )
+                            };
+                            let bg = if selected {
+                                bg_sel
+                            } else if resp.hovered() {
+                                bg_hover
+                            } else {
+                                bg_idle
                             };
                             painter.rect_filled(rect, 6.0, bg);
                             if selected {
+                                let sel_stroke = if dark {
+                                    Color32::from_rgb(120, 160, 255)
+                                } else {
+                                    Color32::from_rgb(30, 100, 220)
+                                };
                                 painter.rect_stroke(
                                     rect,
                                     6.0,
-                                    egui::Stroke::new(2.0, Color32::from_rgb(120, 160, 255)),
+                                    egui::Stroke::new(2.0, sel_stroke),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -2035,16 +2068,17 @@ impl App {
 
                             // Filename label (elided to the cell width).
                             let name = name_of(&path);
+                            let (name_sel, name_idle) = if dark {
+                                (Color32::WHITE, Color32::LIGHT_GRAY)
+                            } else {
+                                (Color32::BLACK, Color32::from_rgb(82, 82, 88))
+                            };
                             painter.text(
                                 egui::pos2(rect.center().x, rect.max.y - pad - label_h / 2.0),
                                 egui::Align2::CENTER_CENTER,
                                 elide(&name, cell_w - pad),
                                 egui::FontId::proportional(11.0),
-                                if selected {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::LIGHT_GRAY
-                                },
+                                if selected { name_sel } else { name_idle },
                             );
 
                             if !locked {
@@ -2192,10 +2226,14 @@ impl App {
                 }
             }
             if let Some(err) = &self.error {
-                ui.colored_label(
-                    Color32::from_rgb(255, 130, 130),
-                    format!("{}  {err}", icons::WARNING_CIRCLE),
-                );
+                // Dark theme keeps the light-red; light theme needs a dark
+                // red for contrast on the light status bar.
+                let err_color = if ui.style().visuals.dark_mode {
+                    Color32::from_rgb(255, 130, 130)
+                } else {
+                    Color32::from_rgb(190, 30, 30)
+                };
+                ui.colored_label(err_color, format!("{}  {err}", icons::WARNING_CIRCLE));
             }
             ui.label(&self.status);
         });

@@ -524,13 +524,26 @@ pub fn show_associations_dialog(ctx: &egui::Context, app: &mut App) {
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 if let Some((ok, msg)) = &app.assoc_msg {
-                    let (icon, color) = if *ok {
-                        (icons::CHECK_CIRCLE, egui::Color32::from_rgb(120, 220, 140))
-                    } else {
-                        (
+                    // Theme-aware status colors: the dark-theme palettes are
+                    // too washed out on a light background.
+                    let dark = ui.style().visuals.dark_mode;
+                    let (icon, color) = match (*ok, dark) {
+                        (true, _) => (
+                            icons::CHECK_CIRCLE,
+                            if dark {
+                                egui::Color32::from_rgb(120, 220, 140)
+                            } else {
+                                egui::Color32::from_rgb(0, 140, 70)
+                            },
+                        ),
+                        (false, _) => (
                             icons::WARNING_CIRCLE,
-                            egui::Color32::from_rgb(255, 130, 130),
-                        )
+                            if dark {
+                                egui::Color32::from_rgb(255, 130, 130)
+                            } else {
+                                egui::Color32::from_rgb(190, 30, 30)
+                            },
+                        ),
                     };
                     ui.label(egui::RichText::new(format!("{icon}  {msg}")).color(color));
                 } else {

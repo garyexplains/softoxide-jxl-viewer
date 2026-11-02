@@ -10,8 +10,6 @@ pub const FONT_NAME: &str = "phosphor";
 
 // The handful of icons used by the app (codepoints from Phosphor v2.1).
 pub const FOLDER_OPEN: &str = "\u{E256}";
-pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
-pub const ARROW_CLOCKWISE: &str = "\u{E036}";
 pub const HAND_PALM: &str = "\u{E57E}";
 pub const CROP: &str = "\u{E1D4}";
 pub const FLIP_HORIZONTAL: &str = "\u{ED6A}";
@@ -35,8 +33,18 @@ pub const SKIP_FORWARD: &str = "\u{E5A6}";
 pub const FILM_STRIP: &str = "\u{E792}";
 pub const GEAR: &str = "\u{E270}";
 pub const INFO: &str = "\u{E2CE}";
+pub const SUN: &str = "\u{E472}";
+pub const MOON: &str = "\u{E330}";
 pub const ARROW_UP: &str = "\u{E08E}";
 pub const ARROW_DOWN: &str = "\u{E03E}";
+/// Bent up-left arrow — Undo (the arc arrows belong to Rotate).
+pub const ARROW_U_UP_LEFT: &str = "\u{E08A}";
+/// Bent up-right arrow — Redo.
+pub const ARROW_U_UP_RIGHT: &str = "\u{E08C}";
+/// Arc arrow left — Rotate 90° counter-clockwise.
+pub const ARROW_ARC_LEFT: &str = "\u{E014}";
+/// Arc arrow right — Rotate 90° clockwise.
+pub const ARROW_ARC_RIGHT: &str = "\u{E016}";
 
 /// Registers the vendored Phosphor font as a proportional-text fallback.
 pub fn add_to_fonts(fonts: &mut eframe::egui::FontDefinitions) {

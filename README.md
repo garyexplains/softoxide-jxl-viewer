@@ -36,6 +36,13 @@ views. It runs unchanged on Windows, macOS and Linux.
 - **Metadata & info**: the toolbar `ⓘ` button (or the `I` key) opens an image-info panel with
   file facts plus every EXIF tag (parsed with kamadak-exif) and the presence of raw XMP/IPTC.
   The `info` CLI command prints the same summary (make/model, exposure trio, orientation, …).
+- **Dark / light theme toggle**: the toolbar
+  sun/moon button switches the whole UI between a dark and a light theme (canvas, folder grid,
+  dialogs, status bar included; image-anchored overlays stay readable on top of images in
+  either). The choice persists in a small settings file (`theme.txt`) under the OS
+  configuration directory (`%APPDATA%\SoftOxide\JXL Viewer` on Windows,
+  `~/Library/Application Support/SoftOxide/JXL Viewer` on macOS, `~/.config/softoxide-jxl-viewer`
+  on Linux). Dark is the default; the native window title bar keeps following the OS.
 - **EXIF orientation is applied automatically** for JPEG/PNG/TIFF/WebP sources and for JXL
   (header orientation), so camera-rotated photos display upright everywhere.
 - Zoom (wheel at pointer), pan (drag), fit / 1:1, checkerboard behind transparency.

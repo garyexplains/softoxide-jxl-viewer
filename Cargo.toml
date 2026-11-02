@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "jxl-native"]
+members = [".", "jxl-native", "avif-native"]
 resolver = "3"
 
 [package]
@@ -16,6 +16,7 @@ authors = ["Gary Sims"]
 
 [dependencies]
 jxl-native = { path = "jxl-native" }
+avif-native = { path = "avif-native" }
 
 # GUI — rendered entirely by the app itself (no OS widget toolkits).
 # The renderer is picked explicitly at runtime in src/lib.rs::run_gui

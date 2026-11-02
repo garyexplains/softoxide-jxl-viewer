@@ -121,6 +121,33 @@ pub fn from_jxl(exif_tiff: Option<Vec<u8>>, xmp: Option<Vec<u8>>) -> Option<Imag
     })
 }
 
+/// AVIF metadata: the payload of the container's Exif item (TIFF, possibly
+/// with an "Exif\0\0" prefix) and the XMP item. IPTC has no AVIF item slot.
+pub fn from_avif(exif_payload: &[u8], xmp: &[u8]) -> Option<ImageMetadata> {
+    if exif_payload.is_empty() && xmp.is_empty() {
+        return None;
+    }
+    // Locate the TIFF header inside the payload: spec variants put a TI-FF
+    // header either directly, after an "Exif\0\0" prefix, or (worst case)
+    // after padding bytes — libavif's helper covers all cases.
+    let mut tiff: &[u8] = exif_payload;
+    if !tiff.starts_with(b"II*\0") && !tiff.starts_with(b"MM\0*") {
+        match avif_native::exif_tiff_header_offset(exif_payload) {
+            Some(off) => {
+                if let Some(t) = tiff.get(off..) {
+                    tiff = t;
+                }
+            }
+            None => tiff = &[],
+        }
+    }
+    Some(ImageMetadata {
+        exif: parse_exif_tiff(tiff),
+        xmp: (!xmp.is_empty()).then(|| xmp.to_vec()),
+        iptc: None,
+    })
+}
+
 /// JXL metadata without a decode: parses the container's boxes via a
 /// header-level jxl-oxide read.
 fn from_jxl_peek(bytes: &[u8]) -> Option<ImageMetadata> {

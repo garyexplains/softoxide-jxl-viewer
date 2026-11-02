@@ -10,7 +10,9 @@ views. It runs unchanged on Windows, macOS and Linux.
 ## Features
 
 ### Viewing
-- Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF, WebP, PNM.
+- Open **JPEG XL** (codestream or container, lossless and lossy), plus PNG, JPEG, GIF, BMP, TIFF,
+  WebP, PNM, and **AVIF stills** (animated sequences and PQ/HLG HDR files are declined
+  gracefully with a status message).
 - **Folder grid**: "Folder…" (Ctrl+Shift+O) shows every supported image in a folder as a
   thumbnail grid (lazy-loading, off-thread decode, memory-budgeted LRU cache). The grid
   header sorts by **name or date** (ascending/descending toggle) and adjusts the
@@ -76,7 +78,11 @@ and renamed, so a save can never leave a truncated image behind.
 
 ### Conversion
 - **Save as** JPEG XL, PNG, JPEG, BMP, TIFF — right in the GUI (Save As dialog with per-format
-  options).
+  options). (AVIF has no save path; it is decode-only.)
+- **AVIF decode**: still images through vendored libavif+libaom (container, alpha, grid images,
+  8/10/12-bit sources surfaces as 8/16-bit storage, `irot`/`imir` transforms applied, EXIF/XMP
+  carried into the info panel and Save-as carry-through). Animated AVIF and PQ/HLG HDR are
+  declined with friendly errors.
 - **Metadata carry-through**: a **Keep metadata** checkbox (JPEG XL / PNG / JPEG targets)
   embeds the source file's EXIF/XMP/IPTC — as ISO-BMFF **"Exif"** and **"xml "** boxes in JPEG
   XL containers (encoded with libjxl itself), `eXIf` + `iTXt` chunks in PNG, and `APP1`
@@ -87,8 +93,9 @@ and renamed, so a save can never leave a truncated image behind.
   carries each source file's *own* metadata; the CLI gets `convert --keep-metadata`.
 - **JPEG XL save options**: one-click **presets** (Lossless, Visually lossless, Small — each
   also in a *fast* effort-3 variant) plus *lossless* (mathematically lossless), *distance*
-  (VarDCT quality, 1.0 ≈ visually lossless), *effort* (1–10), *keep/drop alpha*, *modular mode*
-  and **tile size** (modular group size: 128/256/512/1024 or encoder default).
+  (VarDCT quality, 1.0 ≈ visually lossless), *effort* (1–10, default 7 — libjxl's own default),
+  *keep/drop alpha*, *modular mode* and **tile size** (modular group size: 128/256/512/1024 or
+  encoder default).
 - **Headless CLI** for scripting & batch use:
   - `jxlviewer convert IN OUT [--lossless] [--distance 1.0] [--effort 7] [--modular]
     [--group-size 256] [--keep-alpha] [--quality 90] [--keep-metadata]`
@@ -115,12 +122,16 @@ Requirements: Rust 1.85+, CMake ≥ 3.20, a C++17 compiler, and the standard pla
 # 1) fetch libjxl sources (pinned v0.12.0, ~150 MB with submodules)
 tools/fetch-libjxl.sh        # or: powershell -File tools/fetch-libjxl.ps1
 
-# 2) build
+# 2) fetch libavif + libaom sources (pinned v1.4.2 / v3.15.1) for AVIF decode
+tools/fetch-avif.sh          # or: powershell -File tools/fetch-avif.ps1
+
+# 3) build
 cargo build --release
 ```
 
-`JXL_LIBJXL_DIR` can point at another libjxl checkout instead of the pinned one.
-First build compiles libjxl from scratch and takes several minutes.
+`JXL_LIBJXL_DIR` can point at another libjxl checkout instead of the pinned one; `AVIF_LIBAVIF_DIR` /
+`AVIF_AOM_DIR` likewise for the AVIF pair. First build compiles libjxl, libaom and libavif from
+scratch and takes several minutes.
 
 ### App icon & packaging
 
@@ -154,7 +165,7 @@ cargo run --release --example gen_icon
 The viewer can register itself as the program Windows uses to open image files:
 
 - **GUI** — the gear icon at the end of the toolbar opens a dialog listing every
-  supported type (`.jxl`, `.png`, `.jpg`, `.gif`, `.bmp`, `.tiff`, `.webp`,
+  supported type (`.jxl`, `.png`, `.jpg`, `.gif`, `.bmp`, `.tiff`, `.webp`, `.avif`,
   `.pn*` …); toggling a checkbox registers or removes that association at once.
 - **CLI** — `jxlviewer register [EXTS…]` (default: `jxl`; `--all` for every
   supported type), `jxlviewer unregister [EXTS…]`, and `jxlviewer registered`
@@ -191,6 +202,7 @@ src/
   raster.rs   Raster pixel buffer (RGB/RGBA, 8/16-bit), crop/rotate/flip/resize
   codec.rs    format sniffing, decode dispatch, save encoders incl. metadata carry
   meta.rs     EXIF/XMP/IPTC extraction (kamadak-exif), save-side box/chunk writers
+  avif-native/ pinned libavif+libaom FFI (AVIF still decode), test-fixture encoder
   icons.rs    vendored Phosphor icon font (assets/fonts/Phosphor.ttf)
   hdr.rs      HDR → SDR: PQ/HLG EOTFs, tone mapping, Rec.2100 → sRGB
   nav.rs      folder navigation: prev/next image by name or mtime
@@ -231,7 +243,9 @@ the same terms.
 - **libjxl** (fetched at build time from the pinned v0.12.0 sources, not committed) remains
   under its own BSD-3-Clause license (JPEG XL Project Authors), as do its bundled submodules.
 - Runtime dependencies are MIT/Apache-2.0/BSD-style: egui/eframe, image, fast_image_resize,
-  jxl-oxide, moxcms, rfd, jpeg-encoder, gif, kamadak-exif (BSD-2-Clause). The vendored
-  Phosphor icon font is MIT.
+  jxl-oxide, moxcms, rfd, jpeg-encoder, gif, kamadak-exif (BSD-2-Clause). AVIF stills decode
+  through vendored **libavif + libaom** (both BSD-2-Clause; pinned sources fetched by
+  `tools/fetch-avif.*`, not committed — same model as libjxl). The vendored Phosphor icon
+  font is MIT.
 - The application icon is original artwork generated by `examples/gen_icon.rs` —
   no third-party assets.

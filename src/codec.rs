@@ -5,6 +5,8 @@
 //! * JPEG XL encode: libjxl via `jxl-native` (lossless / distance / effort /
 //!   modular mode / tiling via modular group size).
 //! * PNG/JPEG/GIF/BMP/TIFF/WebP: `image` crate.
+//! * AVIF stills: vendored libavif + libaom via `avif-native`
+//!   (stills only; animated sequences and PQ/HLG HDR rejected gracefully).
 
 use image::ImageEncoder as _;
 use std::io::Cursor;
@@ -27,6 +29,7 @@ pub enum Format {
     Tiff,
     WebP,
     Pnm,
+    Avif,
     Unknown,
 }
 
@@ -41,6 +44,7 @@ impl Format {
             Format::Tiff => "TIFF",
             Format::WebP => "WebP",
             Format::Pnm => "PNM (PPM/PGM)",
+            Format::Avif => "AVIF",
             Format::Unknown => "Unknown",
         }
     }
@@ -68,6 +72,7 @@ pub fn format_by_extension(ext: &str) -> Format {
         "tif" | "tiff" => Format::Tiff,
         "webp" => Format::WebP,
         "ppm" | "pgm" | "pbm" | "pnm" => Format::Pnm,
+        "avif" => Format::Avif,
         _ => Format::Unknown,
     }
 }
@@ -97,6 +102,20 @@ pub fn detect_format(bytes: &[u8], ext_hint: Option<&str>) -> Format {
     }
     if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
         return Format::WebP;
+    }
+    // AVIF: ISO-BMFF with an "ftyp" box naming an AVIF brand (major brand at
+    // offset 8, compatible brands after it). Plain "mif1" without another
+    // AVIF marker stays unrecognized so we never bite at HEIC files.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let is_avif_brand = |b: &[u8]| b == b"avif" || b == b"avis";
+        let mut avif = is_avif_brand(&bytes[8..12]);
+        if !avif && bytes.len() > 12 {
+            let end = bytes.len().min(96);
+            avif = bytes[12..end].chunks_exact(4).any(is_avif_brand);
+        }
+        if avif {
+            return Format::Avif;
+        }
     }
     // Netpbm: P1..P7 (P6 = color PPM, P5 = gray PGM, PF = float PFM…)
     if bytes.len() >= 3
@@ -172,12 +191,26 @@ pub fn decode_from_bytes(bytes: &[u8], ext_hint: Option<&str>) -> Result<LoadedI
     let mut img = match format {
         Format::Jxl => decode_jxl(bytes),
         Format::Gif => decode_gif(bytes),
+        Format::Avif => decode_avif(bytes),
         Format::Unknown => return Err("unknown file format".to_string()),
         _ => decode_with_image_crate(bytes, format, ext_hint),
     }?;
-    // Non-JXL containers are decoded without rotation; apply the EXIF
-    // orientation ourselves (GIF carries none, so this is a no-op there).
-    if format != Format::Jxl {
+    // AVIF containers apply their own irot/imir transforms in decode_avif and
+    // carry their own metadata; fall back to the EXIF orientation tag only
+    // when the container itself didn't transform the pixels.
+    if format == Format::Avif {
+        if let Some(mut meta) = img.meta.take() {
+            if !meta.orientation_applied() {
+                if let Some(o) = meta.orientation() {
+                    img.raster = img.raster.apply_exif_orientation(o);
+                    if let Some(ex) = meta.exif.as_mut() {
+                        ex.applied = true;
+                    }
+                }
+            }
+            img.meta = Some(meta);
+        }
+    } else if format != Format::Jxl {
         if let Some(mut meta) = crate::meta::from_bytes(bytes, format) {
             let orientation = meta.orientation();
             if let Some(o) = orientation {
@@ -930,6 +963,98 @@ fn normalize_stream<T: Copy>(raw: &[T], channels: usize, has_alpha: bool, full: 
     out
 }
 
+/// AVIF still-image decode via the statically-linked libavif/libaom
+/// (`avif-native`). Animated sequences and PQ/HLG HDR are refused with
+/// friendly errors by `avif_native::decode`. Container transforms (`irot`/
+/// `imir`) are applied here, mirroring libavif's own EXIF→transform order
+/// (rotation first, then mirror; verified against `src/exif.c` in the
+/// vendored libavif).
+fn decode_avif(bytes: &[u8]) -> Result<LoadedImage, String> {
+    use avif_native::Pixels as AvifPixels;
+
+    let still = avif_native::decode(bytes).map_err(|e| e.to_string())?;
+    let (w, h) = (still.width, still.height);
+    if w == 0 || h == 0 {
+        return Err("avif: zero-dimension image".into());
+    }
+    let channels: usize = if still.has_alpha { 4 } else { 3 };
+    let expected = w as usize * h as usize * channels;
+
+    let mut raster = match (&still.pixels, still.bits) {
+        (AvifPixels::U8(d), 8) if d.len() == expected => {
+            Raster::from_rgba8(w, h, still.has_alpha, d.clone())
+        }
+        (AvifPixels::U16(d), 16) if d.len() == expected => {
+            Raster::from_rgba16(w, h, still.has_alpha, d.clone())
+        }
+        _ => return Err("avif: unexpected pixel buffer size".into()),
+    };
+
+    // Container transform — rotation first, then mirror.
+    let mut rotated = false;
+    if let Some(transform) = still.transform {
+        use avif_native::ContainerTransform as T;
+        match transform {
+            T::RotateCcw { quarters } => {
+                for _ in 0..quarters {
+                    raster = raster.rotate_ccw();
+                }
+                rotated = true;
+            }
+            T::Mirror { left_right } => {
+                raster = if left_right {
+                    raster.flip_h()
+                } else {
+                    raster.flip_v()
+                };
+                rotated = true;
+            }
+            T::RotateMirror {
+                quarters,
+                left_right,
+            } => {
+                for _ in 0..quarters {
+                    raster = raster.rotate_ccw();
+                }
+                raster = if left_right {
+                    raster.flip_h()
+                } else {
+                    raster.flip_v()
+                };
+                rotated = true;
+            }
+        }
+    }
+
+    let mut meta = crate::meta::from_avif(&still.exif, &still.xmp);
+    // The pixels were rotated for display; a later save must neutralize the
+    // carried tag (same reasoning as the JXL paths).
+    if rotated {
+        if let Some(ex) = meta.as_mut().and_then(|m| m.exif.as_mut()) {
+            ex.applied = true;
+        }
+    }
+
+    let note = if still.source_depth > 8 {
+        Some(format!(
+            "decoded with libavif ({}-bit source, stored 16-bit)",
+            still.source_depth
+        ))
+    } else {
+        None
+    };
+
+    Ok(LoadedImage {
+        raster,
+        format: Format::Avif,
+        via_fallback: false,
+        note,
+        hdr: None,
+        animation: None,
+        meta,
+    })
+}
+
 /// Compacts interleaved RGBA → RGB.
 fn strip_alpha<T: Copy + Default>(rgba: Vec<T>) -> Vec<T> {
     let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
@@ -1076,7 +1201,11 @@ impl Default for JxlSaveOptions {
         Self {
             lossless: false,
             distance: 1.0,
-            effort: 3,
+            // libjxl's own default. This used to be 3 because MSVC-built
+            // libjxl encoded ~50x slower; the clang-cl toolchain removed
+            // that problem, so 7 (visually lossless, best quality per
+            // preset measurements) is the default again.
+            effort: 7,
             keep_alpha: true,
             modular: false,
             group_size: None,

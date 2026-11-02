@@ -76,6 +76,10 @@ pub const FORMATS: &[AssocFormat] = &[
         desc: "WebP image",
     },
     AssocFormat {
+        ext: "avif",
+        desc: "AVIF image",
+    },
+    AssocFormat {
         ext: "pnm",
         desc: "PNM image",
     },

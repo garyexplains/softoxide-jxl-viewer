@@ -1620,8 +1620,8 @@ impl App {
         dialog = dialog.add_filter(
             "Images",
             &[
-                "jxl", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "ppm", "pgm",
-                "pbm", "pnm",
+                "jxl", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "avif", "ppm",
+                "pgm", "pbm", "pnm",
             ],
         );
         if let Some(path) = dialog.pick_file() {

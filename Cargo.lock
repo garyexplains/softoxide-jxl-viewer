@@ -381,6 +381,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "avif-native"
+version = "0.1.0"
+dependencies = [
+ "cmake",
+ "dunce",
+]
+
+[[package]]
 name = "avif-serialize"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1961,6 +1969,7 @@ dependencies = [
 name = "jxlviewer"
 version = "0.1.0"
 dependencies = [
+ "avif-native",
  "eframe",
  "fast_image_resize",
  "filetime",

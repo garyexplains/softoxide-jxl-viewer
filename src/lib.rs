@@ -203,10 +203,32 @@ fn report_gui_failure(err: &eframe::Error) {
 #[cfg(windows)]
 fn windows_wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+    use std::sync::Arc;
 
     let mut create = WgpuSetupCreateNew::without_display_handle();
     create.instance_descriptor.backends = eframe::egui_wgpu::wgpu::Backends::DX12;
     create.native_adapter_selector = Some(std::sync::Arc::new(select_dx12_adapter));
+
+    // eframe's default device limits cap 2D textures at 8192 regardless of
+    // hardware, and egui asserts (taking the whole app down) when a texture
+    // exceeds that. Ask for the adapter's true limit instead; egui reads the
+    // effective limit back from the device (`max_texture_side`), so large
+    // photos upload instead of crashing.
+    create.device_descriptor = Arc::new(|adapter| {
+        let base = if adapter.get_info().backend == eframe::egui_wgpu::wgpu::Backend::Gl {
+            eframe::egui_wgpu::wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            eframe::egui_wgpu::wgpu::Limits::default()
+        };
+        let mut limits = base;
+        limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
+        eframe::egui_wgpu::wgpu::DeviceDescriptor {
+            label: Some("SoftOxide JXL Viewer device").into(),
+            required_features: eframe::egui_wgpu::wgpu::Features::default(),
+            required_limits: limits,
+            ..Default::default()
+        }
+    });
 
     eframe::egui_wgpu::WgpuConfiguration {
         wgpu_setup: WgpuSetup::CreateNew(create),

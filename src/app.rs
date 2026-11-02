@@ -194,6 +194,8 @@ pub struct App {
 
     pub(crate) texture: Option<TextureHandle>,
     pub(crate) texture_nearest: bool,
+    /// (w, h) when the displayed texture is a downscaled copy (GPU limit).
+    pub(crate) texture_downscaled: Option<(u32, u32)>,
     pub(crate) needs_rebuild: bool,
     pub(crate) checker: TextureHandle,
     pub(crate) pending_open: Option<PathBuf>,
@@ -265,6 +267,7 @@ impl App {
             canvas_rect: None,
             texture: None,
             texture_nearest: false,
+            texture_downscaled: None,
             needs_rebuild: true,
             checker,
             pending_open: None,
@@ -780,6 +783,23 @@ fn build_checker_texture(ctx: &egui::Context) -> TextureHandle {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamped_texture_dims_scales_down_and_preserves_aspect() {
+        assert!(App::clamped_texture_dims(4000, 3000, 8192) == (4000, 3000));
+        assert_eq!(App::clamped_texture_dims(17000, 1200, 8192), (8192, 578));
+        assert_eq!(App::clamped_texture_dims(1200, 17000, 16384), (1156, 16384));
+        // aspect preserved: 17000/1200 ≈ 8192/578 (±1 rounding)
+        let factor = 8192.0f32 / 17000.0f32;
+        let want_h = (1200.0f32 * factor).round() as u32; // 578
+        let got = App::clamped_texture_dims(17000, 1200, 8192).1;
+        assert!((want_h - got) <= 1, "h {got} vs {want_h}");
+    }
+}
+
 impl eframe::App for App {
     /// Non-UI work: message pump, queued/dropped opens.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1264,6 +1284,21 @@ impl App {
         self.viewer.zoom.unwrap_or_else(|| fit_zoom(avail, img))
     }
 
+    /// Display-texture dimensions capped at the renderer's max texture side
+    /// (aspect preserved; no upscale). No-self associated fn so tests can call
+    /// it directly.
+    fn clamped_texture_dims(w: u32, h: u32, max_side: usize) -> (u32, u32) {
+        let longest = w.max(h) as usize;
+        if longest <= max_side || longest == 0 {
+            return (w, h);
+        }
+        let factor = max_side as f32 / longest as f32;
+        (
+            ((w as f32 * factor).max(1.0) as u32).max(1),
+            ((h as f32 * factor).max(1.0) as u32).max(1),
+        )
+    }
+
     fn refresh_texture(&mut self, ctx: &egui::Context) {
         let Some(doc) = &self.doc else { return };
         let img = Vec2::new(doc.raster.width as f32, doc.raster.height as f32);
@@ -1273,9 +1308,25 @@ impl App {
             || self.needs_rebuild
             || self.texture_nearest != (effective >= 3.0)
         {
+            // egui asserts (taking the app down) when a texture exceeds the
+            // renderer's max texture side. Very large photos still need to
+            // open, so clamp the *displayed* texture down to the limit (the
+            // full-res raster is untouched for edits/crops/saves).
+            let max_side = ctx.input(|i| i.max_texture_side);
+            let (tw, th) =
+                Self::clamped_texture_dims(doc.raster.width, doc.raster.height, max_side);
+            let (raster, downscaled) = if (tw, th) != (doc.raster.width, doc.raster.height) {
+                match doc.raster.resized(tw, th, ResizeFilter::Bilinear) {
+                    Ok(r) => (r, true),
+                    Err(_) => (doc.raster.clone(), false),
+                }
+            } else {
+                (doc.raster.clone(), false)
+            };
+            self.texture_downscaled = downscaled.then_some((tw, th));
             self.texture = Some(ctx.load_texture(
                 "image",
-                doc.raster.to_color_image(),
+                raster.to_color_image(),
                 if effective >= 3.0 {
                     TextureOptions::NEAREST
                 } else {
@@ -1753,6 +1804,16 @@ impl App {
                     Color32::LIGHT_GRAY,
                 );
             }
+        }
+
+        if let Some((tw, th)) = self.texture_downscaled {
+            painter.text(
+                avail_rect.left_bottom() + egui::vec2(8.0, -8.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("display downscaled to {} × {} (GPU texture limit)", tw, th),
+                egui::FontId::proportional(11.0),
+                ui.style().visuals.weak_text_color(),
+            );
         }
     }
 
